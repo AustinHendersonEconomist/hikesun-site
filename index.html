@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HikeSun ☀ — sunny hikes near Christchurch</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <header>
+      <h1>HikeSun <span class="sun">☀</span></h1>
+      <p class="tagline">Find hikes that will be in the sun — terrain shadows, forest cover and forecast, together.</p>
+    </header>
+
+    <form id="search-form" autocomplete="off">
+      <div class="field-row">
+        <label>Date
+          <input type="date" id="date" required>
+        </label>
+        <label>Start time
+          <input type="time" id="time" value="10:00" step="900" required>
+        </label>
+      </div>
+      <div class="field-row">
+        <label>Min walk (min)
+          <input type="number" id="min-minutes" min="0" step="15" placeholder="any">
+        </label>
+        <label>Max walk (min)
+          <input type="number" id="max-minutes" min="0" step="15" placeholder="any">
+        </label>
+        <label>Max drive (min)
+          <input type="number" id="drive-min" value="30" min="5" max="240" step="5">
+        </label>
+      </div>
+      <div class="diff-label">Difficulty</div>
+      <div class="diff-boxes" id="difficulty">
+        <label class="diff"><input type="checkbox" value="easiest"><span>easiest</span></label>
+        <label class="diff"><input type="checkbox" value="easy"><span>easy</span></label>
+        <label class="diff"><input type="checkbox" value="moderate"><span>moderate</span></label>
+        <label class="diff"><input type="checkbox" value="hard"><span>hard</span></label>
+        <label class="diff"><input type="checkbox" value="expert"><span>expert</span></label>
+      </div>
+      <button type="submit" id="search-btn">Search sunny hikes</button>
+    </form>
+
+    <div id="status" class="status" hidden></div>
+    <div id="results" aria-live="polite"></div>
+    <footer id="credits">Data: OpenStreetMap (ODbL), LINZ, AWS Terrain Tiles, Open-Meteo — not an official trail guide; check conditions before you go.</footer>
+  </aside>
+
+  <main id="map-wrap">
+    <div class="scrubber">
+      <span class="scrub-title">Sun at</span>
+      <output id="scrub-label">10:00</output>
+      <input type="range" id="scrub" min="480" max="1020" step="15" value="600"
+             disabled aria-label="Time of day scrubber">
+      <span id="scrub-info">Select a trail to scrub its sunlight through the day</span>
+    </div>
+    <div id="map"></div>
+    <div class="legend">
+      <span><i class="swatch sun-sw"></i> Sun</span>
+      <span><i class="swatch shade-sw"></i> Shade</span>
+    </div>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
