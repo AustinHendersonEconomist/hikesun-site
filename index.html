@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HikeSun ☀ — sunny hikes near Christchurch</title>
+  <title>HikeSun ☀ — sunny hikes in New Zealand</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -15,6 +15,15 @@
     </header>
 
     <form id="search-form" autocomplete="off">
+      <label class="addr-label" for="addr">Start from</label>
+      <div class="addr-row">
+        <input type="text" id="addr" placeholder="e.g. 12 Fake St, Wellington"
+               autocomplete="off" aria-label="Start from address">
+        <button type="button" id="addr-go" title="Find address">Find</button>
+        <button type="button" id="locate-btn" title="Use my location" aria-label="Use my location">🧭</button>
+        <div id="addr-results" class="addr-results" hidden></div>
+      </div>
+      <div id="origin-label">📍 Origin: Christchurch (default)</div>
       <div class="field-row">
         <label>Date
           <input type="date" id="date" required>
@@ -47,7 +56,7 @@
 
     <div id="status" class="status" hidden></div>
     <div id="results" aria-live="polite"></div>
-    <footer id="credits">Data: OpenStreetMap (ODbL), LINZ, AWS Terrain Tiles, Open-Meteo — not an official trail guide; check conditions before you go.</footer>
+    <footer id="credits">Data: DOC &amp; Herenga ā Nuku (CC-BY), OpenStreetMap (ODbL), LINZ, AWS Terrain Tiles, Open-Meteo. Geocoding: OSM Nominatim. Photos: Wikimedia Commons. Not an official trail guide; check conditions before you go.</footer>
   </aside>
 
   <main id="map-wrap">
@@ -57,8 +66,15 @@
       <input type="range" id="scrub" min="480" max="1020" step="15" value="600"
              disabled aria-label="Time of day scrubber">
       <span id="scrub-info">Select a trail to scrub its sunlight through the day</span>
+      <button type="button" id="origin-arm" title="Set origin by clicking the map">📍 Set origin</button>
+    </div>
+    <div id="photo-strip" class="photo-strip" hidden>
+      <div id="photos" class="photos"></div>
+      <span id="photo-credit" class="photo-credit" hidden>photos:
+        <a href="https://commons.wikimedia.org/" target="_blank" rel="noopener">Wikimedia Commons</a></span>
     </div>
     <div id="map"></div>
+    <div id="toast" class="toast" role="status"></div>
     <div class="legend">
       <span><i class="swatch sun-sw"></i> Sun</span>
       <span><i class="swatch shade-sw"></i> Shade</span>

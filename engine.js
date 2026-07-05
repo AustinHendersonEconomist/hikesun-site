@@ -1,10 +1,18 @@
 /* HikeSun client-side scoring engine — a faithful port of hikesun/sun.py and
  * hikesun/score.py so the app can run 100% statically (GitHub Pages).
  *
- * Data comes from tools/export_static.py:
- *   trails.json  — trail metadata + sampled points + `hoff` row offsets
- *   horizons.bin — Uint8 rows of az_bins bytes per trail point;
- *                  angle_deg = byte * quant.scale + quant.offset
+ * Data comes from tools/export_static.py, sharded into 1-degree cells so the
+ * browser only downloads the regions it needs:
+ *   data/index.json — az_bins, quant {scale, offset}, cell_deg and the list
+ *                     of non-empty cells {id, bbox, n_trails}
+ *   data/cells/{id}/trails.json  — trail metadata + sampled points + `hoff`
+ *                     row offsets LOCAL to that cell's horizons.bin
+ *   data/cells/{id}/horizons.bin — Uint8 rows of az_bins bytes per trail
+ *                     point; angle_deg = byte * quant.scale + quant.offset
+ *
+ * Call Engine.loadIndex() once, then Engine.ensureCells([lon, lat], radiusKm)
+ * before searching around a new origin; loaded cells are merged into one
+ * in-memory store (each trail's hoff is rebased to the global row space).
  *
  * Conventions (same as the Python code): coordinates are WGS84 (lon, lat);
  * azimuths degrees clockwise from TRUE NORTH [0, 360); horizon bin k covers
@@ -166,36 +174,127 @@ const Engine = (() => {
     return isoNZ(epochMs).slice(0, 10);
   }
 
-  /* ---- data loading ------------------------------------------------------ */
+  /* ---- data loading (sharded cells) -------------------------------------- */
 
-  let data = null; // { trails, byId, horizons: Uint8Array, azBins, quant }
+  const CELL_MARGIN_KM = 30; // extra half-width padding around search squares
+  const M_PER_DEG_LON_EQ = Math.PI / 180.0 * 6371000.0;
 
-  async function loadData(baseUrl = ".") {
+  let dataBase = "."; // base URL holding the data/ tree (set by loadIndex)
+  // Merged store over all loaded cells. cellState: id -> Promise that settles
+  // when the cell is merged (or confirmed missing); loadedCells counts cells
+  // that finished loading, including empty/404 ones.
+  let data = null; // { cells, cellDeg, azBins, quant, generated,
+                   //   trails, byId, horizons: Uint8Array, rows,
+                   //   cellState: Map, loadedCells }
+
+  /* Fetch {base}/data/index.json and reset the in-memory store. Must be
+   * called (and awaited) before any other data function. */
+  async function loadIndex(baseUrl = ".") {
     const base = baseUrl.replace(/\/+$/, "");
-    const [meta, buf] = await Promise.all([
-      fetch(`${base}/trails.json`).then((r) => {
-        if (!r.ok) throw new Error(`trails.json: HTTP ${r.status}`);
-        return r.json();
-      }),
-      fetch(`${base}/horizons.bin`).then((r) => {
-        if (!r.ok) throw new Error(`horizons.bin: HTTP ${r.status}`);
-        return r.arrayBuffer();
-      }),
-    ]);
+    const resp = await fetch(`${base}/data/index.json`);
+    if (!resp.ok) throw new Error(`data/index.json: HTTP ${resp.status}`);
+    const meta = await resp.json();
+    dataBase = base;
     data = {
-      trails: meta.trails,
-      byId: new Map(meta.trails.map((t) => [t.id, t])),
-      horizons: new Uint8Array(buf),
+      cells: meta.cells,
+      cellDeg: meta.cell_deg,
       azBins: meta.az_bins,
       quant: meta.quant,
       generated: meta.generated,
+      trails: [],
+      byId: new Map(),
+      horizons: new Uint8Array(0),
+      rows: 0,
+      cellState: new Map(),
+      loadedCells: 0,
     };
     return data;
   }
 
   function requireData() {
-    if (!data) throw new Error("trail data not loaded — call loadData() first");
+    if (!data) throw new Error("trail index not loaded — call loadIndex() first");
     return data;
+  }
+
+  /* (metres per degree longitude, latitude) at lat — mirrors geo.m_per_deg. */
+  function mPerDeg(latDeg) {
+    const latR = latDeg * DEG;
+    return {
+      lon: M_PER_DEG_LON_EQ * Math.cos(latR),
+      lat: 111132.954 - 559.822 * Math.cos(2 * latR)
+        + 1.175 * Math.cos(4 * latR),
+    };
+  }
+
+  /* Synchronously splice one fetched cell into the merged store; the trail
+   * hoff values in the file are LOCAL and get rebased to the global rows. */
+  function mergeCell(id, meta, bytes) {
+    const d = requireData();
+    if (bytes.length % d.azBins !== 0) {
+      throw new Error(`cell ${id}: horizons.bin size ${bytes.length}` +
+        ` is not a multiple of az_bins=${d.azBins}`);
+    }
+    const rowsBefore = d.rows;
+    for (const trail of meta.trails) {
+      trail.hoff += rowsBefore;
+      d.trails.push(trail);
+      d.byId.set(trail.id, trail);
+    }
+    const merged = new Uint8Array(d.horizons.length + bytes.length);
+    merged.set(d.horizons, 0);
+    merged.set(bytes, d.horizons.length);
+    d.horizons = merged;
+    d.rows = rowsBefore + bytes.length / d.azBins;
+  }
+
+  async function fetchCell(id) {
+    const dir = `${dataBase}/data/cells/${id}`;
+    const [metaResp, binResp] = await Promise.all([
+      fetch(`${dir}/trails.json`),
+      fetch(`${dir}/horizons.bin`),
+    ]);
+    if (metaResp.status === 404 || binResp.status === 404) {
+      // deployed index lists a cell whose files are gone: treat as empty
+      console.warn(`HikeSun: cell ${id} files missing (404), treating as empty`);
+      data.loadedCells++;
+      return;
+    }
+    if (!metaResp.ok) throw new Error(`${dir}/trails.json: HTTP ${metaResp.status}`);
+    if (!binResp.ok) throw new Error(`${dir}/horizons.bin: HTTP ${binResp.status}`);
+    const [meta, buf] = await Promise.all([metaResp.json(), binResp.arrayBuffer()]);
+    mergeCell(id, meta, new Uint8Array(buf));
+    data.loadedCells++;
+  }
+
+  /* Load cell id exactly once; concurrent callers share the same promise.
+   * A failed (non-404) fetch is forgotten so a later call can retry. */
+  function loadCell(id) {
+    const d = requireData();
+    let pending = d.cellState.get(id);
+    if (!pending) {
+      pending = fetchCell(id);
+      d.cellState.set(id, pending);
+      pending.catch(() => d.cellState.delete(id));
+    }
+    return pending;
+  }
+
+  /* Ensure every cell within reach of a search around origin [lon, lat]
+   * (WGS84) with radiusKm is loaded: cells whose bbox intersects the square
+   * of half-width (radiusKm + 30) km around the origin are fetched in
+   * parallel; already-loaded cells are never refetched. Resolves with the
+   * total number of loaded cells (across all calls so far). */
+  async function ensureCells([lon, lat], radiusKm) {
+    const d = requireData();
+    const m = mPerDeg(lat);
+    const halfM = (radiusKm + CELL_MARGIN_KM) * 1000.0;
+    const dLon = halfM / m.lon;
+    const dLat = halfM / m.lat;
+    const wanted = d.cells.filter((c) =>
+      c.bbox[0] <= lon + dLon && c.bbox[2] >= lon - dLon &&
+      c.bbox[1] <= lat + dLat && c.bbox[3] >= lat - dLat);
+    await Promise.all(wanted.map((c) => loadCell(c.id)));
+    return d.loadedCells;
   }
 
   /* ---- scoring (port of hikesun/score.py) -------------------------------- */
@@ -295,6 +394,9 @@ const Engine = (() => {
         length_m: trail.length_m,
         est_minutes: est,
         canopy_frac: trail.canopy_frac,
+        region: trail.region,
+        url: trail.url,
+        photo_url: trail.photo_url,
         drive_km: distKm,
         drive_min_est: distKm / DRIVE_KM_PER_MIN,
         start: trail.start,
@@ -343,6 +445,10 @@ const Engine = (() => {
       length_m: trail.length_m,
       est_minutes: trail.est_minutes,
       canopy_frac: trail.canopy_frac,
+      region: trail.region,
+      description: trail.description,
+      url: trail.url,
+      photo_url: trail.photo_url,
       geometry: trail.geometry,
       points,
       timeline,
@@ -359,7 +465,11 @@ const Engine = (() => {
       const url = `${OPEN_METEO_URL}?latitude=${lat.toFixed(4)}` +
         `&longitude=${lon.toFixed(4)}&hourly=cloud_cover` +
         `&timezone=Pacific%2FAuckland&start_date=${dateStr}&end_date=${dateStr}`;
-      const resp = await fetch(url);
+      // hard 8 s cap: weather being down must never stall the UI
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 8000);
+      const resp = await fetch(url, { signal: abort.signal }).finally(
+        () => clearTimeout(timer));
       if (!resp.ok) return null;
       const body = await resp.json();
       const idx = body.hourly.time.indexOf(
@@ -374,8 +484,8 @@ const Engine = (() => {
   }
 
   return {
-    sunPosition, nzEpoch, isoNZ, nzDateStr, loadData, inSun, scoreTrail,
-    search, trailDetail, getCloudCover,
+    sunPosition, nzEpoch, isoNZ, nzDateStr, loadIndex, ensureCells, inSun,
+    scoreTrail, search, trailDetail, getCloudCover,
   };
 })();
 
@@ -396,7 +506,12 @@ const Engine = (() => {
  *   Engine.sunPosition(-43.5321, 172.6362, 1768424400000)
  *     // { elevation: 39.8035, azimuth: 81.8071 }    (2026-01-15 10:00 NZDT)
  *
- *   // After Engine.loadData("."):
+ *   // Load the shard index, then the cells around Christchurch (30 min
+ *   // drive => 25.5 km search radius; cells within radius + 30 km load):
+ *   await Engine.loadIndex(".")                       // { cells: [...], ... }
+ *   await Engine.ensureCells([172.6362, -43.5321], 30 * 0.85)
+ *     // -> total loaded cell count (e.g. 2: "172_-44" + "172_-43");
+ *     //    calling it again with the same origin resolves without refetching
  *   Engine.search({ lat: -43.5321, lon: 172.6362, driveMin: 30,
  *                   startMs: Engine.nzEpoch("2026-07-02", "10:00") })
  *     // results sorted by sun.effective desc; timeline t values end +12:00

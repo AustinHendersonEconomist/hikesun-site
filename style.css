@@ -332,3 +332,197 @@ input:focus {
   #results { min-height: 210px; }
   #scrub-info { display: none; }
 }
+
+/* ---- origin: address search + map controls ------------------------------ */
+
+input[type="text"] {
+  width: 100%;
+  margin-top: 5px;
+  padding: 8px 10px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 0.9rem;
+  color: #1f2937;
+  background: #fbfcfe;
+}
+
+.addr-row { display: flex; gap: 6px; margin-top: 5px; position: relative; }
+
+.addr-row input { flex: 1; min-width: 0; margin-top: 0; }
+
+.addr-row button {
+  flex-shrink: 0;
+  padding: 0 12px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.82rem;
+  color: #4b5563;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.addr-row button:hover { border-color: #fdb515; background: #fffaf0; }
+
+.addr-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1300;
+  background: #fff;
+  border: 1px solid #d7dde5;
+  border-radius: 10px;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+  overflow: hidden auto;
+  max-height: 250px;
+}
+
+.addr-results button {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid #f2f4f8;
+  background: #fff;
+  text-align: left;
+  font: inherit;
+  font-size: 0.78rem;
+  color: #374151;
+  cursor: pointer;
+}
+
+.addr-results button:hover { background: #fdf3d7; }
+
+.addr-empty {
+  padding: 9px 12px;
+  font-size: 0.78rem;
+  color: #6b7280;
+}
+
+.addr-credit {
+  padding: 5px 12px;
+  font-size: 0.62rem;
+  color: #9aa3af;
+  background: #fbfcfe;
+}
+
+#origin-label {
+  margin-top: 7px;
+  font-size: 0.72rem;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* draggable sun-yellow origin pin (divIcon) */
+.origin-pin { filter: drop-shadow(0 2px 3px rgba(15, 23, 42, 0.4)); }
+
+/* "click the map to set origin" toggle in the scrubber bar */
+#origin-arm {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.74rem;
+  color: #4b5563;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+#origin-arm:hover { border-color: #fdb515; }
+
+#origin-arm.armed {
+  background: #fdb515;
+  border-color: #fdb515;
+  color: #462e00;
+  font-weight: 600;
+}
+
+#map.picking,
+#map.picking * { cursor: crosshair !important; }
+
+/* transient "origin set" toast over the map */
+.toast {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200;
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: #1f2937;
+  color: #fff;
+  font-size: 0.8rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s;
+}
+
+.toast.show { opacity: 0.92; }
+
+/* ---- photos -------------------------------------------------------------- */
+
+/* card layout gains an optional thumbnail; without one it looks as before */
+.card { display: flex; gap: 12px; align-items: flex-start; }
+
+.card-main { flex: 1; min-width: 0; }
+
+.card-photo {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 9px;
+  border: 1px solid #e7ebf0;
+  background: #f1f4f8;
+}
+
+/* photo strip under the scrubber for the selected trail */
+.photo-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px;
+  background: #fff;
+  border-bottom: 1px solid #e5e9ef;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+  z-index: 1040;
+  overflow-x: auto;
+}
+
+.photo-strip[hidden] { display: none; }
+
+.photos { display: flex; gap: 8px; }
+
+.photo-strip .photo { flex-shrink: 0; display: block; }
+
+.photo-strip img {
+  display: block;
+  height: 64px;
+  width: auto;
+  max-width: 140px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #e7ebf0;
+  background: #f1f4f8;
+}
+
+.photo-credit {
+  margin-left: auto;
+  padding-left: 10px;
+  font-size: 0.66rem;
+  color: #9aa3af;
+  white-space: nowrap;
+}
+
+.photo-credit a { color: inherit; }
+
+/* Herenga ā Nuku source badge */
+.badge.hnk { background: #fdeaf2; color: #b83280; }
