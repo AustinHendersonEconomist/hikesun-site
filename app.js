@@ -157,6 +157,20 @@ function fmtMinutes(min) {
   return rest ? `${h} h ${rest} min` : `${h} h`;
 }
 
+// canopy chip: native bush vs plantation (LCDB land-cover), or null to omit
+const CANOPY_KIND = {
+  native: ["🌿", "native bush"],
+  exotic: ["🌲", "plantation"],
+  mixed: ["🌳", "mixed forest"],
+};
+function canopyMeta(r) {
+  if (r.canopy_frac == null || r.canopy_type === "none") return null;
+  const pct = Math.round(r.canopy_frac * 100);
+  if (pct === 0) return null;   // barely clips bush — not worth a chip
+  const [emoji, label] = CANOPY_KIND[r.canopy_type] || ["🌲", "canopy"];
+  return `<span title="Tree canopy (LCDB land cover)">${emoji} ${pct}% ${label}</span>`;
+}
+
 function minutesToHHMM(total) {
   const h = Math.floor(total / 60);
   const m = total % 60;
@@ -408,9 +422,8 @@ function buildCard(r) {
   }
   meta.push(`<span>🥾 ${fmtMinutes(r.est_minutes)}</span>`);
   meta.push(`<span>🚗 ~${Math.round(r.drive_min_est)} min (${r.drive_km.toFixed(0)} km)</span>`);
-  if (r.canopy_frac != null) {
-    meta.push(`<span>🌲 ${Math.round(r.canopy_frac * 100)}% canopy</span>`);
-  }
+  const canopy = canopyMeta(r);
+  if (canopy) meta.push(canopy);
 
   const slots = r.timeline.map((s) =>
     `<i style="background:${sunTint(s.frac)}" title="${s.t.slice(11, 16)} — ${Math.round(s.frac * 100)}% in sun"></i>`
