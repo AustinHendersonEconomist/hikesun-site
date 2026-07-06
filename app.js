@@ -14,6 +14,7 @@ const SUN_RGB = [253, 181, 21];
 const SHADE_RGB = [203, 213, 225]; // light grey for 0%-sun timeline slots
 const UNNAMED = "Unnamed track";
 const DRIVE_KM_PER_MIN = 0.85; // crow-flies km per minute of driving
+const SCRUB_HINT = "Drag the slider to move the sun; click a trail to see its sunlight";
 
 // Search origin: user-movable, persisted; default is Cathedral Square,
 // Christchurch (same default as the API). Stored as {lon, lat, label}.
@@ -517,8 +518,14 @@ function renderResults(results) {
   trailLayer.clearLayers();
   selected = null;
   hidePhotoStrip();
-  scrub.disabled = true;
-  scrubInfo.textContent = "Select a trail to scrub its sunlight through the day";
+  scrubInfo.textContent = SCRUB_HINT;
+  // start the shared scrubber at the searched time; from here the user can
+  // drag it freely (moving the shadows) and any trail they pick is shown at
+  // whatever time the slider is on.
+  const searchMin = hhmmToMinutes(timeInput.value || "10:00");
+  scrub.value = Math.max(480, Math.min(1020, Math.round(searchMin / 15) * 15));
+  scrubLabel.textContent = minutesToHHMM(+scrub.value);
+  scheduleShadowUpdate();
 
   updateRankLock(results);
   syncRankToggleUI();
@@ -735,11 +742,8 @@ function selectTrail(result, card) {
   for (const c of resultsBox.querySelectorAll(".card")) c.classList.remove("selected");
   card.classList.add("selected");
 
-  // start the scrubber at the searched start time, clamped to 08:00-17:00
-  const start = hhmmToMinutes(timeInput.value || "10:00");
-  scrub.value = Math.max(480, Math.min(1020, Math.round(start / 15) * 15));
-  scrub.disabled = false;
-  scrubLabel.textContent = minutesToHHMM(+scrub.value);
+  // keep the scrubber wherever the user left it (they may have been
+  // exploring shadows at another time); show this trail's sun for that time
   loadTrailDetail(true);
   loadPhotoStrip(result);
 }
@@ -803,9 +807,16 @@ function cloudAtScrub() {
 
 scrub.addEventListener("input", () => {
   scrubLabel.textContent = minutesToHHMM(+scrub.value);
-  clearTimeout(scrubTimer);
-  scrubTimer = setTimeout(() => loadTrailDetail(false), 120);
-  scheduleShadowUpdate();
+  scheduleShadowUpdate();  // move the shadows regardless of any selection
+  if (selected) {
+    clearTimeout(scrubTimer);
+    scrubTimer = setTimeout(() => loadTrailDetail(false), 120);
+  } else {
+    // no trail chosen yet: reflect the time and keep nudging toward the map
+    scrubInfo.textContent = shadowsEnabled
+      ? `Terrain shadows at ${minutesToHHMM(+scrub.value)} — click a trail to see its sunlight`
+      : `${minutesToHHMM(+scrub.value)} — turn on 🌗 Shadows, or click a trail`;
+  }
 });
 
 /* date change also drives the shadow overlay (bound to both the scrubber
