@@ -22,157 +22,19 @@
 "use strict";
 
 const Engine = (() => {
-  const TZ = "Pacific/Auckland";
-  const SUN_MIN_ELEV_DEG = 0.25; // sun must clear this to count as up at all
-  const CLOUD_PENALTY = 0.75;    // effective = terrain * (1 - 0.75 * cloud)
-  const SAMPLE_MIN = 10;         // timeline sampling step (minutes)
-  const DRIVE_KM_PER_MIN = 0.85; // crow-flies km per minute of driving
+  const SUN_MIN_ELEV_DEG = 0.25;   // sun must clear this to count as up at all
+  const CLOUD_ATTENUATION = 0.75; // effective = terrain * (1 - 0.75 * cloud)
+  const SAMPLE_MIN = 10;           // timeline sampling step (minutes)
+  const DRIVE_KM_PER_MIN = 0.85;   // crow-flies km per minute of driving
   const R_EARTH_KM = 6371.0;
   const DEG = Math.PI / 180.0;
   const OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast";
+  const FORECAST_CACHE_TTL_MS = 60 * 60 * 1000; // 60 min, matches the plan
 
-  /* Python-style modulo: result has the sign of the divisor. */
-  function mod(a, b) {
-    return ((a % b) + b) % b;
-  }
-
-  function clip(x, lo, hi) {
-    return Math.min(hi, Math.max(lo, x));
-  }
-
-  /* ---- solar position (port of hikesun/sun.py, NOAA algorithm) ---------- */
-
-  /* NOAA atmospheric refraction correction (degrees) for a true (geometric)
-   * elevation in degrees. Same piecewise formula as _refraction_deg. */
-  function refractionDeg(elevDeg) {
-    if (elevDeg > 85.0) return 0.0;
-    const tanE = Math.tan(elevDeg * DEG);
-    if (elevDeg > 5.0) {
-      return (58.1 / tanE - 0.07 / tanE ** 3 + 0.000086 / tanE ** 5) / 3600.0;
-    }
-    if (elevDeg > -0.575) {
-      return (1735.0 + elevDeg * (-518.2 + elevDeg *
-        (103.4 + elevDeg * (-12.79 + elevDeg * 0.711)))) / 3600.0;
-    }
-    return (-20.774 / tanE) / 3600.0;
-  }
-
-  /* Sun {elevation, azimuth} in degrees at a UTC epoch (ms). Azimuth is
-   * clockwise from true north [0, 360); elevation includes refraction. */
-  function sunPosition(latDeg, lonDeg, dateUTCms) {
-    // Unix epoch is JD 2440587.5.
-    const jd = dateUTCms / 86400000.0 + 2440587.5;
-    const jc = (jd - 2451545.0) / 36525.0; // Julian centuries since J2000.0
-
-    const meanLong = mod(280.46646 + jc * (36000.76983 + jc * 0.0003032), 360.0);
-    const meanAnom = 357.52911 + jc * (35999.05029 - 0.0001537 * jc);
-    const eccent = 0.016708634 - jc * (0.000042037 + 0.0000001267 * jc);
-
-    const maR = meanAnom * DEG;
-    const eqOfCtr = Math.sin(maR) * (1.914602 - jc * (0.004817 + 0.000014 * jc))
-      + Math.sin(2 * maR) * (0.019993 - 0.000101 * jc)
-      + Math.sin(3 * maR) * 0.000289;
-    const trueLong = meanLong + eqOfCtr;
-    const omega = (125.04 - 1934.136 * jc) * DEG; // lunar ascending node
-    const appLong = trueLong - 0.00569 - 0.00478 * Math.sin(omega);
-
-    const meanObliq = 23.0 + (26.0 + (21.448 - jc * (46.815 + jc *
-      (0.00059 - jc * 0.001813))) / 60.0) / 60.0;
-    const obliqR = (meanObliq + 0.00256 * Math.cos(omega)) * DEG;
-
-    const decl = Math.asin(Math.sin(obliqR) * Math.sin(appLong * DEG)); // rad
-
-    const varY = Math.tan(obliqR / 2.0) ** 2;
-    const mlR = meanLong * DEG;
-    const eqTimeMin = 4.0 / DEG * (
-      varY * Math.sin(2 * mlR)
-      - 2.0 * eccent * Math.sin(maR)
-      + 4.0 * eccent * varY * Math.sin(maR) * Math.cos(2 * mlR)
-      - 0.5 * varY ** 2 * Math.sin(4 * mlR)
-      - 1.25 * eccent ** 2 * Math.sin(2 * maR)
-    );
-
-    // jd + 0.5 puts the day boundary at 00:00 UTC, so the fractional part
-    // is minutes-into-the-UTC-day; tst lands in [0, 1440) after the mod.
-    const utcMin = mod(jd + 0.5, 1.0) * 1440.0;
-    const tst = mod(utcMin + eqTimeMin + 4.0 * lonDeg, 1440.0);
-    const haR = (tst / 4.0 - 180.0) * DEG;
-
-    const latR = latDeg * DEG;
-    const cosZen = clip(Math.sin(latR) * Math.sin(decl)
-      + Math.cos(latR) * Math.cos(decl) * Math.cos(haR), -1.0, 1.0);
-    const zen = Math.acos(cosZen);
-    let elev = 90.0 - zen / DEG;
-    elev += refractionDeg(elev);
-
-    const sinZen = Math.sin(zen);
-    let az;
-    if (sinZen < 1e-12) {
-      az = 0.0; // azimuth undefined at zenith
-    } else {
-      const cosAz = clip(
-        (Math.sin(latR) * cosZen - Math.sin(decl)) / (Math.cos(latR) * sinZen),
-        -1.0, 1.0);
-      const azBase = Math.acos(cosAz) / DEG;
-      az = haR > 0.0 ? mod(azBase + 180.0, 360.0) : mod(540.0 - azBase, 360.0);
-    }
-    return { elevation: elev, azimuth: az };
-  }
-
-  /* ---- Pacific/Auckland wall-clock time ---------------------------------- */
-
-  const nzFormatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: TZ, hour12: false,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-  });
-
-  /* NZ wall-clock date/time at epochMs, re-encoded as a fake-UTC epoch so
-   * (wall - epoch) is the NZ UTC offset in ms. */
-  function nzWallMs(epochMs) {
-    const p = {};
-    for (const part of nzFormatter.formatToParts(epochMs)) {
-      p[part.type] = part.value;
-    }
-    // hour12:false can yield "24" at midnight; normalise to 0.
-    return Date.UTC(+p.year, +p.month - 1, +p.day,
-      +p.hour % 24, +p.minute, +p.second);
-  }
-
-  /* UTC epoch (ms) for wall-clock "YYYY-MM-DD" + "HH:MM" in Pacific/Auckland,
-   * regardless of the viewer's timezone. Guess the epoch as if NZ were UTC,
-   * format the guess back into NZ wall time via Intl, and correct by the
-   * difference; the second iteration settles DST-boundary cases (UTC+12
-   * winter / UTC+13 daylight time, resolved from the tz database). */
-  function nzEpoch(dateStr, timeStr) {
-    const [y, mo, d] = dateStr.split("-").map(Number);
-    const [h, mi] = timeStr.split(":").map(Number);
-    const targetWall = Date.UTC(y, mo - 1, d, h, mi || 0, 0);
-    let epoch = targetWall;
-    for (let i = 0; i < 2; i++) {
-      epoch += targetWall - nzWallMs(epoch);
-    }
-    return epoch;
-  }
-
-  /* ISO-8601 string with the correct +12:00/+13:00 NZ offset, matching
-   * Python's datetime.isoformat() (e.g. "2026-07-02T10:00:00+12:00"). */
-  function isoNZ(epochMs) {
-    const offsetMin = (nzWallMs(epochMs) - epochMs) / 60000;
-    const wall = new Date(epochMs + offsetMin * 60000);
-    const pad = (n) => String(n).padStart(2, "0");
-    const sign = offsetMin < 0 ? "-" : "+";
-    const absOff = Math.abs(offsetMin);
-    return `${wall.getUTCFullYear()}-${pad(wall.getUTCMonth() + 1)}-` +
-      `${pad(wall.getUTCDate())}T${pad(wall.getUTCHours())}:` +
-      `${pad(wall.getUTCMinutes())}:${pad(wall.getUTCSeconds())}` +
-      `${sign}${pad(Math.floor(absOff / 60))}:${pad(absOff % 60)}`;
-  }
-
-  /* NZ wall-clock "YYYY-MM-DD" for an epoch (today's date when omitted). */
-  function nzDateStr(epochMs = Date.now()) {
-    return isoNZ(epochMs).slice(0, 10);
-  }
+  /* Solar position + Pacific/Auckland wall-clock helpers now live in
+   * sunmath.js (loaded before this file) so shadow-worker.js can share them
+   * via importScripts. Delegate rather than re-implement. */
+  const { sunPosition, nzEpoch, isoNZ, nzDateStr } = SunMath;
 
   /* ---- data loading (sharded cells) -------------------------------------- */
 
@@ -323,12 +185,41 @@ const Engine = (() => {
     return sunny / trail.points.length;
   }
 
+  /* cloudSeries[hour] for a given epoch ms, if epochMs's NZ-local calendar
+   * date matches cloudDate, else null. Mirrors Python's _cloud_at_slot:
+   * cloudSeries is a 24-entry array for ONE local date, so this only misses
+   * at the very tail of a very late-starting long hike. */
+  function cloudAtSlot(cloudSeries, cloudDate, epochMs) {
+    if (cloudSeries == null) return null;
+    const dateStr = nzDateStr(epochMs);
+    if (dateStr !== cloudDate) return null;
+    const hour = Number(isoNZ(epochMs).slice(11, 13));
+    const v = cloudSeries[hour];
+    return v == null ? null : v;
+  }
+
   /* Score how sunny a trail is over a hike starting at startMs (UTC epoch
    * ms). Same result shape as Python score_trail: {trail_id, terrain_frac,
-   * timeline: [{t, frac}], effective, cloud_cover, no_forecast} with 10-min
-   * sampling inclusive of both endpoints. */
-  function scoreTrail(trail, startMs, durationMin = null, cloud = null) {
+   * timeline: [{t, frac}], timeline_cloud, effective, cloud_cover,
+   * no_forecast} with 10-min sampling inclusive of both endpoints.
+   *
+   * Cloud input is EITHER a single scalar `cloud` (0..1, applied uniformly —
+   * legacy/simple mode) OR a 24-hour `cloudSeries` (as from getCloudSeries)
+   * for the local calendar date `cloudDate` ("YYYY-MM-DD", required when
+   * cloudSeries is given), in which case `effective` is duration-weighted:
+   * for each 10-min slot, terrainSlotFrac * (1 - CLOUD_ATTENUATION *
+   * cloud(slotHour)), averaged over all slots (slots with no cloud value for
+   * that hour count as terrain-only). Only one of cloud/cloudSeries may be
+   * given. */
+  function scoreTrail(trail, startMs, durationMin = null,
+                       { cloud = null, cloudSeries = null, cloudDate = null } = {}) {
     requireData();
+    if (cloud != null && cloudSeries != null) {
+      throw new Error("scoreTrail: pass only one of cloud, cloudSeries");
+    }
+    if (cloudSeries != null && cloudDate == null) {
+      throw new Error("scoreTrail: cloudDate is required when cloudSeries is given");
+    }
     let duration;
     if (durationMin != null) {
       duration = durationMin;
@@ -338,23 +229,57 @@ const Engine = (() => {
     }
     const n = Math.floor(duration / SAMPLE_MIN) + 1;
     const timeline = [];
+    const fracs = [];
+    const times = [];
     let total = 0;
     for (let k = 0; k < n; k++) {
       const t = startMs + k * SAMPLE_MIN * 60000;
       const frac = sunFracAt(trail, t);
       total += frac;
+      fracs.push(frac);
+      times.push(t);
       timeline.push({ t: isoNZ(t), frac });
     }
     const terrainFrac = total / n;
-    const effective = cloud == null
-      ? terrainFrac : terrainFrac * (1.0 - CLOUD_PENALTY * cloud);
+
+    let effective;
+    let cloudCover;
+    let noForecast;
+    let timelineCloud;
+    if (cloudSeries != null) {
+      noForecast = false;
+      const windowClouds = [];
+      let slotSum = 0;
+      timelineCloud = times.map((t) => cloudAtSlot(cloudSeries, cloudDate, t));
+      for (let k = 0; k < n; k++) {
+        const c = timelineCloud[k];
+        slotSum += c == null ? fracs[k] : fracs[k] * (1.0 - CLOUD_ATTENUATION * c);
+        if (c != null) windowClouds.push(c);
+      }
+      effective = slotSum / n;
+      cloudCover = windowClouds.length
+        ? windowClouds.reduce((a, b) => a + b, 0) / windowClouds.length
+        : null;
+    } else if (cloud != null) {
+      noForecast = false;
+      effective = terrainFrac * (1.0 - CLOUD_ATTENUATION * cloud);
+      timelineCloud = times.map(() => cloud);
+      cloudCover = cloud;
+    } else {
+      noForecast = true;
+      effective = terrainFrac;
+      cloudCover = null;
+      timelineCloud = times.map(() => null);
+    }
+
     return {
       trail_id: trail.id,
       terrain_frac: terrainFrac,
       timeline,
+      timeline_cloud: timelineCloud,
       effective,
-      cloud_cover: cloud,
-      no_forecast: cloud == null,
+      cloud_cover: cloudCover,
+      no_forecast: noForecast,
     };
   }
 
@@ -368,14 +293,36 @@ const Engine = (() => {
   }
 
   /* Sunny-trail search; same filters, result shape and ordering as Python
-   * score.search. cloud is an optional 0..1 fraction (fetched once for the
-   * origin by the caller via getCloudCover). */
-  function search({ lat, lon, driveMin = 30, startMs, minMinutes = null,
-                    maxMinutes = null, difficulties = null, limit = 20,
-                    cloud = null }) {
+   * score.search.
+   *
+   * Two-pass scoring: every candidate within radius/filters is scored on
+   * TERRAIN ALONE first; the top `limit` by terrain_frac are kept, and (when
+   * useWeather) a SINGLE batched Open-Meteo call (getCloudSeriesBatch)
+   * fetches per-trail hourly cloud series for those candidates' start
+   * coordinates. Each kept trail is then rescored with its own
+   * duration-weighted cloud series so `effective` reflects the actual
+   * weather over THAT trail's hike window. Fallback chain per trail: batch
+   * entry -> a single shared origin series (getCloudSeries, fetched at most
+   * once) -> no forecast at all (sun.cloud_source becomes null, no_forecast
+   * true).
+   *
+   * opts.rankBy selects the final sort key: "forecast" (default) sorts by
+   * sun.effective descending (falls back to terrain_frac for any trail with
+   * no forecast, since effective === terrain_frac in that case); "terrain"
+   * sorts by sun.terrain_frac descending regardless of weather.
+   *
+   * Returns a Promise resolving to up to limit result dicts (async because
+   * of the batched forecast fetch). */
+  async function search({ lat, lon, driveMin = 30, startMs, minMinutes = null,
+                          maxMinutes = null, difficulties = null, limit = 20,
+                          useWeather = true, rankBy = "forecast" }) {
+    if (rankBy !== "forecast" && rankBy !== "terrain") {
+      throw new Error(`search: rankBy must be "forecast" or "terrain", got ${rankBy}`);
+    }
     const d = requireData();
     const radiusKm = driveMin * DRIVE_KM_PER_MIN;
-    const results = [];
+
+    const candidates = [];
     for (const trail of d.trails) {
       if (!trail.start) continue;
       const distKm = haversineKm(lon, lat, trail.start[0], trail.start[1]);
@@ -384,7 +331,51 @@ const Engine = (() => {
       if (minMinutes != null && (est == null || est < minMinutes)) continue;
       if (maxMinutes != null && (est == null || est > maxMinutes)) continue;
       if (difficulties != null && !difficulties.includes(trail.difficulty)) continue;
-      const score = scoreTrail(trail, startMs, null, cloud);
+      const terrainScore = scoreTrail(trail, startMs, null);
+      candidates.push({ trail, distKm, terrainScore });
+    }
+
+    // Pass 1 result: keep only the top `limit` by terrain, so the (single)
+    // batched forecast call covers exactly the trails we will return. Ties
+    // break by ascending id so membership at the truncation boundary is
+    // deterministic and identical to hikesun/score.py.
+    candidates.sort((a, b) =>
+      (b.terrainScore.terrain_frac - a.terrainScore.terrain_frac)
+      || (a.trail.id - b.trail.id));
+    const kept = candidates.slice(0, limit);
+
+    const cloudDate = nzDateStr(startMs);
+    let batchSeries = null;
+    if (useWeather && kept.length) {
+      const coords = kept.map((c) => [c.trail.points[0][1], c.trail.points[0][0]]);
+      batchSeries = await getCloudSeriesBatch(coords, cloudDate);
+    }
+
+    let originSeries = null;
+    let originSeriesFetched = false;
+    const results = [];
+    for (let i = 0; i < kept.length; i++) {
+      const { trail, distKm, terrainScore } = kept[i];
+      const est = trail.est_minutes;
+      let cloudSource = null;
+      let finalScore = terrainScore;
+      if (useWeather) {
+        let series = batchSeries != null ? batchSeries[i] : null;
+        let source = "trail";
+        if (series == null) {
+          if (!originSeriesFetched) {
+            originSeries = await getCloudSeries(lat, lon, cloudDate);
+            originSeriesFetched = true;
+          }
+          series = originSeries;
+          source = "origin";
+        }
+        if (series != null) {
+          finalScore = scoreTrail(trail, startMs, null,
+            { cloudSeries: series, cloudDate });
+          cloudSource = source;
+        }
+      }
       results.push({
         id: trail.id,
         name: trail.name,
@@ -402,16 +393,26 @@ const Engine = (() => {
         drive_min_est: distKm / DRIVE_KM_PER_MIN,
         start: trail.start,
         sun: {
-          terrain_frac: score.terrain_frac,
-          cloud_cover: score.cloud_cover,
-          effective: score.effective,
-          no_forecast: score.no_forecast,
+          terrain_frac: finalScore.terrain_frac,
+          cloud_cover: finalScore.cloud_cover,
+          effective: finalScore.effective,
+          cloud_source: cloudSource,
+          no_forecast: finalScore.no_forecast,
         },
-        timeline: score.timeline,
+        timeline: finalScore.timeline,
+        timeline_cloud: finalScore.timeline_cloud,
       });
     }
-    results.sort((a, b) => b.sun.effective - a.sun.effective);
-    return results.slice(0, limit);
+
+    // Final ordering: ties break by ascending id (parity with score.py).
+    if (rankBy === "terrain") {
+      results.sort((a, b) =>
+        (b.sun.terrain_frac - a.sun.terrain_frac) || (a.id - b.id));
+    } else {
+      results.sort((a, b) =>
+        (b.sun.effective - a.sun.effective) || (a.id - b.id));
+    }
+    return results;
   }
 
   /* Full detail for one trail: metadata, geometry, per-point sun state at
@@ -457,12 +458,83 @@ const Engine = (() => {
     };
   }
 
-  /* ---- weather (port of score.get_cloud_cover) ---------------------------- */
+  /* ---- weather (port of hikesun/score.py get_cloud_cover/get_cloud_series/
+   * get_cloud_series_batch) --------------------------------------------- */
+
+  // In-memory forecast cache: key -> { value, expiresAt }. Mirrors the
+  // Python in-process dict cache; localStorage backs it across page loads
+  // with the same 60-min TTL (see FORECAST_CACHE_TTL_MS).
+  const forecastMemCache = new Map();
+  const LS_PREFIX = "hikesun-wx:";
+
+  function round01(x) {
+    return Math.round(x * 10) / 10;
+  }
+
+  function seriesCacheKey(lat, lon, dateStr) {
+    return `series:${round01(lat)},${round01(lon)},${dateStr}`;
+  }
+
+  function readCache(key) {
+    const hit = forecastMemCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.value;
+    if (hit) forecastMemCache.delete(key);
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(LS_PREFIX + key);
+      if (!raw) return undefined;
+      const parsed = JSON.parse(raw);
+      if (parsed.expiresAt <= Date.now()) {
+        window.localStorage.removeItem(LS_PREFIX + key);
+        return undefined;
+      }
+      forecastMemCache.set(key, parsed);
+      return parsed.value;
+    } catch (err) {
+      return undefined;
+    }
+  }
+
+  function writeCache(key, value) {
+    const entry = { value, expiresAt: Date.now() + FORECAST_CACHE_TTL_MS };
+    forecastMemCache.set(key, entry);
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(entry));
+      }
+    } catch (err) {
+      // localStorage full/unavailable (private browsing etc.) — memory
+      // cache still works, just doesn't survive a reload.
+    }
+  }
+
+  function cloudCoverFracs(values) {
+    return values.map((v) =>
+      v == null ? null : Math.min(1.0, Math.max(0.0, v / 100.0)));
+  }
 
   /* Open-Meteo hourly cloud cover fraction (0..1) for the NZ-local dateStr
    * ("YYYY-MM-DD") at the given NZ-local hour, or null on ANY failure so
-   * weather can never break scoring. */
+   * weather can never break scoring. Kept for backward compatibility; new
+   * code should prefer getCloudSeries (one call gets all 24 hours). */
   async function getCloudCover(lat, lon, dateStr, hour) {
+    const series = await getCloudSeries(lat, lon, dateStr);
+    return series == null ? null : series[hour] ?? null;
+  }
+
+  /* Open-Meteo hourly cloud cover fractions (0..1) for all 24 hours of
+   * dateStr ("YYYY-MM-DD", Pacific/Auckland local date) at (lat, lon).
+   *
+   * Returns an array of 24 numbers (null entries where Open-Meteo itself has
+   * a null), or null on any failure (network error, bad payload, date beyond
+   * the ~16-day forecast horizon) so weather can never break scoring.
+   * Cached in-memory + localStorage, keyed on (lat/lon rounded to 0.1 deg,
+   * dateStr), TTL 60 min. */
+  async function getCloudSeries(lat, lon, dateStr) {
+    const key = seriesCacheKey(lat, lon, dateStr);
+    const cached = readCache(key);
+    if (cached !== undefined) return cached;
+
+    let series;
     try {
       const url = `${OPEN_METEO_URL}?latitude=${lat.toFixed(4)}` +
         `&longitude=${lon.toFixed(4)}&hourly=cloud_cover` +
@@ -474,26 +546,71 @@ const Engine = (() => {
         () => clearTimeout(timer));
       if (!resp.ok) return null;
       const body = await resp.json();
-      const idx = body.hourly.time.indexOf(
-        `${dateStr}T${String(hour).padStart(2, "0")}:00`);
-      if (idx < 0) return null;
-      const value = body.hourly.cloud_cover[idx];
-      if (value == null) return null;
-      return Math.min(1.0, Math.max(0.0, value / 100.0));
+      series = cloudCoverFracs(body.hourly.cloud_cover);
     } catch (err) {
       return null;
     }
+    writeCache(key, series);
+    return series;
+  }
+
+  /* Open-Meteo hourly cloud series for MULTIPLE (lat, lon) points at once.
+   *
+   * coords is an array of [lat, lon] pairs. Uses Open-Meteo's
+   * comma-separated multi-coordinate form (one HTTP request for all points)
+   * and returns an array, same length/order as coords, of per-point 24-hour
+   * series (each an array like getCloudSeries's return, or null for that
+   * point on a per-point failure). Returns null (not an array) if the whole
+   * batch request fails (network error, bad payload, date beyond the
+   * forecast horizon) so callers can fall back to a single-point lookup.
+   *
+   * Open-Meteo returns a bare object for a single coordinate and an array
+   * (one object per point, in request order) for multiple — both shapes are
+   * handled. Per-point results are cached the same way as getCloudSeries. */
+  async function getCloudSeriesBatch(coords, dateStr) {
+    if (!coords.length) return [];
+
+    // any already-cached points can skip the network entirely if ALL are hit
+    const cachedAll = coords.map(([lat, lon]) => readCache(seriesCacheKey(lat, lon, dateStr)));
+    if (cachedAll.every((v) => v !== undefined)) return cachedAll;
+
+    let seriesList;
+    try {
+      const lats = coords.map(([lat]) => lat.toFixed(4)).join(",");
+      const lons = coords.map(([, lon]) => lon.toFixed(4)).join(",");
+      const url = `${OPEN_METEO_URL}?latitude=${lats}&longitude=${lons}` +
+        `&hourly=cloud_cover&timezone=Pacific%2FAuckland` +
+        `&start_date=${dateStr}&end_date=${dateStr}`;
+      const abort = new AbortController();
+      const timer = setTimeout(() => abort.abort(), 8000);
+      const resp = await fetch(url, { signal: abort.signal }).finally(
+        () => clearTimeout(timer));
+      if (!resp.ok) return null;
+      const body = await resp.json();
+      // single-coord responses are a bare object; multi-coord an array.
+      const entries = Array.isArray(body) ? body : [body];
+      if (entries.length !== coords.length) return null;
+      seriesList = entries.map((entry) => cloudCoverFracs(entry.hourly.cloud_cover));
+    } catch (err) {
+      return null;
+    }
+    coords.forEach(([lat, lon], i) => writeCache(seriesCacheKey(lat, lon, dateStr), seriesList[i]));
+    return seriesList;
   }
 
   return {
     sunPosition, nzEpoch, isoNZ, nzDateStr, loadIndex, ensureCells, inSun,
-    scoreTrail, search, trailDetail, getCloudCover,
+    scoreTrail, search, trailDetail, getCloudCover, getCloudSeries,
+    getCloudSeriesBatch,
   };
 })();
 
 /* ---- self-test (paste into the browser console) ---------------------------
  * Expected values computed with the Python reference implementation
- * (hikesun.sun.sun_position) — the port should agree to ~1e-6 deg:
+ * (hikesun.sun.sun_position) — the port should agree to ~1e-6 deg. Requires
+ * sunmath.js to be loaded before this file (it is delegated to for
+ * sunPosition/nzEpoch/isoNZ/nzDateStr — see SunMath in sunmath.js for the
+ * same self-test against the SunMath global directly):
  *
  *   Engine.nzEpoch("2026-07-02", "10:00")            // 1782943200000 (NZST, UTC+12)
  *   Engine.nzEpoch("2026-01-15", "10:00")            // 1768424400000 (NZDT, UTC+13)
@@ -514,7 +631,11 @@ const Engine = (() => {
  *   await Engine.ensureCells([172.6362, -43.5321], 30 * 0.85)
  *     // -> total loaded cell count (e.g. 2: "172_-44" + "172_-43");
  *     //    calling it again with the same origin resolves without refetching
- *   Engine.search({ lat: -43.5321, lon: 172.6362, driveMin: 30,
- *                   startMs: Engine.nzEpoch("2026-07-02", "10:00") })
- *     // results sorted by sun.effective desc; timeline t values end +12:00
+ *   await Engine.search({ lat: -43.5321, lon: 172.6362, driveMin: 30,
+ *                         startMs: Engine.nzEpoch("2026-07-02", "10:00") })
+ *     // search is now ASYNC (it batches one Open-Meteo call for the top
+ *     // candidates' start coords) — results default-sorted by sun.effective
+ *     // desc (opts.rankBy: "forecast" default | "terrain"); each result
+ *     // gains sun.cloud_source ("trail"|"origin"|null), sun.cloud_cover
+ *     // (window mean) and a timeline_cloud array aligned 1:1 with timeline.
  * --------------------------------------------------------------------------- */

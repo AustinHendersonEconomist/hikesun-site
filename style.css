@@ -23,6 +23,8 @@ body {
   border-right: 1px solid #e5e9ef;
   box-shadow: 2px 0 14px rgba(15, 23, 42, 0.06);
   z-index: 1100; /* above Leaflet panes/controls */
+  overflow-y: auto; /* whole pane scrolls; scrolling down moves the form
+                        out of view so results get the full pane height */
 }
 
 #sidebar header { padding: 14px 22px 6px; }
@@ -97,6 +99,49 @@ input:focus {
 
 .diff input:focus-visible + span { outline: 2px solid rgba(253, 181, 21, 0.5); }
 
+/* rank-by toggle: segmented chip, same visual language as the diff chips */
+.rank-toggle {
+  display: flex;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.rank-btn {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid #d7dde5;
+  background: #fff;
+  font: inherit;
+  font-size: 0.78rem;
+  color: #4b5563;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.rank-btn:hover { border-color: #fdb515; }
+
+.rank-btn.active {
+  background: #fdb515;
+  border-color: #fdb515;
+  color: #462e00;
+  font-weight: 600;
+}
+
+.rank-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rank-lock-note {
+  margin: 6px 0 0;
+  font-size: 0.72rem;
+  color: #946c00;
+  line-height: 1.4;
+}
+
+.rank-lock-note[hidden] { display: none; }
+
 #search-btn {
   width: 100%;
   margin-top: 12px;
@@ -130,7 +175,7 @@ input:focus {
 
 .status.error { background: #fdeaea; color: #b3261e; }
 
-#results { flex: 1; overflow-y: auto; padding: 14px 0 18px; }
+#results { padding: 14px 0 18px; }
 
 #credits {
   padding: 10px 22px 14px;
@@ -213,6 +258,23 @@ input:focus {
 .chip.moderate { background: #fdf3d7; color: #946c00; }
 .chip.hard { background: #fdeadb; color: #b45309; }
 .chip.expert { background: #f3e8fd; color: #7c3aed; }
+
+/* thin cloud strip directly above the sun timeline: same slots, tinted by
+ * that hour's cloud fraction (white = clear, dark grey = overcast). Only
+ * rendered when a forecast exists for the trail. */
+.cloud-strip {
+  display: flex;
+  gap: 1px;
+  height: 5px;
+  margin-top: 11px;
+  border-radius: 3px 3px 0 0;
+  overflow: hidden;
+  background: #eef1f5;
+}
+
+.cloud-strip + .timeline { margin-top: 1px; border-radius: 0 0 5px 5px; }
+
+.cloud-strip i { flex: 1; }
 
 /* mini sun timeline: one segment per 10-min slot, grey -> yellow */
 .timeline {
@@ -313,6 +375,22 @@ input:focus {
 .swatch { display: inline-block; width: 16px; height: 5px; border-radius: 3px; }
 .sun-sw { background: #fdb515; }
 .shade-sw { background: #64748b; }
+.cloud-sw { background: linear-gradient(to right, #f5f5f5, #8b8b8b); }
+.shadow-sw { background: rgba(30, 41, 59, 0.55); }
+
+/* terrain-tile attribution line, bottom-right of the map */
+.attribution {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  z-index: 999;
+  font-size: 0.62rem;
+  color: #6b7280;
+  background: rgba(255, 255, 255, 0.75);
+  padding: 1px 6px;
+  border-radius: 5px;
+  pointer-events: none;
+}
 
 /* on short viewports, trade the tagline for more visible results */
 @media (max-height: 820px) {
@@ -327,9 +405,7 @@ input:focus {
 @media (max-width: 800px) {
   body { flex-direction: column; }
   #sidebar { width: 100%; min-width: 0; max-height: 60%; }
-  /* results keep priority; the form shrinks and scrolls instead */
-  #search-form { overflow-y: auto; min-height: 110px; }
-  #results { min-height: 210px; }
+  /* whole-pane scroll (#sidebar) replaces the old form-scroll special-casing */
   #scrub-info { display: none; }
 }
 
@@ -444,6 +520,43 @@ input[type="text"] {
   color: #462e00;
   font-weight: 600;
 }
+
+/* "🌗 Shadows" terrain-overlay toggle, same chip style as #origin-arm */
+#shadow-toggle {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  background: #fff;
+  font: inherit;
+  font-size: 0.74rem;
+  color: #4b5563;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+#shadow-toggle:hover { border-color: #fdb515; }
+
+#shadow-toggle.on {
+  background: #fdb515;
+  border-color: #fdb515;
+  color: #462e00;
+  font-weight: 600;
+}
+
+/* small "computing shadows…" chip shown while workers are busy */
+.shadow-busy {
+  flex-shrink: 0;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #eef1f5;
+  color: #6b7280;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.shadow-busy[hidden] { display: none; }
 
 #map.picking,
 #map.picking * { cursor: crosshair !important; }

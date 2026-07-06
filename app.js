@@ -19,6 +19,9 @@ const DRIVE_KM_PER_MIN = 0.85; // crow-flies km per minute of driving
 // Christchurch (same default as the API). Stored as {lon, lat, label}.
 const DEFAULT_ORIGIN = { lon: 172.6362, lat: -43.5321, label: "Christchurch (default)" };
 const ORIGIN_STORE_KEY = "hikesun-origin";
+const RANKMODE_STORE_KEY = "hikesun-rankmode";
+const SHADOWS_STORE_KEY = "hikesun-shadows";
+const SHADOW_DEBOUNCE_MS = 150;
 const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 const COMMONS_API = "https://commons.wikimedia.org/w/api.php";
 
@@ -50,6 +53,21 @@ let searchSeq = 0;        // guards against out-of-order searches
 let photoSeq = 0;         // guards against out-of-order photo-strip loads
 let scrubTimer = null;
 let engineReady = false;  // Engine.loadIndex succeeded
+let lastResults = [];     // most recent search results, re-sorted client-side
+                           // by the rank toggle (no refetch)
+
+/* ---- rank mode (terrain vs forecast) ------------------------------------- */
+
+function loadRankMode() {
+  try {
+    const v = localStorage.getItem(RANKMODE_STORE_KEY);
+    if (v === "terrain" || v === "forecast") return v;
+  } catch (err) { /* corrupt/unavailable storage — fall back to default */ }
+  return "forecast";
+}
+
+let rankMode = loadRankMode();
+let rankLocked = false; // true when forecast is unavailable for this search
 
 /* ---- origin state -------------------------------------------------------- */
 
@@ -87,6 +105,81 @@ L.control.layers({ "Map": osm, "Satellite": esri }).addTo(map);
 
 const markersLayer = L.layerGroup().addTo(map);
 const trailLayer = L.layerGroup().addTo(map);
+
+/* ---- terrain shadow overlay ----------------------------------------------
+ * Dedicated shadowPane (zIndex 350, between basemap tiles 200 and trails
+ * 400), pointer-events:none, opacity ~0.45 so trails stay visible above it.
+ * ShadowLayer creates the pane itself on first onAdd, but we also create it
+ * here up front so it exists (and is correctly ordered) even before the
+ * layer is toggled on for the first time. */
+map.createPane("shadowPane");
+map.getPane("shadowPane").style.zIndex = 350;
+map.getPane("shadowPane").style.pointerEvents = "none";
+
+const isCoarsePointer = typeof matchMedia === "function"
+  && matchMedia("(pointer: coarse)").matches;
+
+function loadShadowsEnabled() {
+  try {
+    const v = localStorage.getItem(SHADOWS_STORE_KEY);
+    if (v === "on" || v === "off") return v === "on";
+  } catch (err) { /* corrupt/unavailable storage — fall back to default */ }
+  return !isCoarsePointer; // default ON for desktop, OFF for coarse pointers
+}
+
+let shadowsEnabled = loadShadowsEnabled();
+
+const shadowLayer = new ShadowLayer({
+  workerUrl: "shadow-worker.js",
+  mode: "auto",
+  opacity: 0.45,
+});
+const shadowBusyChip = el("shadow-busy");
+shadowLayer.on("shadow:busy", () => { shadowBusyChip.hidden = false; });
+shadowLayer.on("shadow:idle", () => { shadowBusyChip.hidden = true; });
+
+const shadowToggleBtn = el("shadow-toggle");
+
+function syncShadowToggleUI() {
+  shadowToggleBtn.classList.toggle("on", shadowsEnabled);
+  shadowToggleBtn.setAttribute("aria-pressed", String(shadowsEnabled));
+}
+
+function applyShadowEnabled() {
+  if (shadowsEnabled) {
+    if (!map.hasLayer(shadowLayer)) shadowLayer.addTo(map);
+    shadowLayer.setEnabled(true);
+    shadowLayer.setTime(currentShadowEpochMs());
+  } else {
+    shadowLayer.setEnabled(false);
+    shadowBusyChip.hidden = true;
+  }
+}
+
+function setShadowsEnabled(on) {
+  shadowsEnabled = on;
+  try {
+    localStorage.setItem(SHADOWS_STORE_KEY, on ? "on" : "off");
+  } catch (err) { /* private mode etc. — preference just won't persist */ }
+  syncShadowToggleUI();
+  applyShadowEnabled();
+}
+
+shadowToggleBtn.addEventListener("click", () => setShadowsEnabled(!shadowsEnabled));
+
+/* current scrubber time as an NZ epoch (ms), for the shadow layer */
+function currentShadowEpochMs() {
+  return SunMath.nzEpoch(dateInput.value, minutesToHHMM(+scrub.value));
+}
+
+let shadowTimer = null;
+function scheduleShadowUpdate() {
+  if (!shadowsEnabled) return;
+  clearTimeout(shadowTimer);
+  shadowTimer = setTimeout(() => {
+    shadowLayer.setTime(currentShadowEpochMs());
+  }, SHADOW_DEBOUNCE_MS);
+}
 
 // sun-yellow draggable origin pin, kept above the result markers
 const originIcon = L.divIcon({
@@ -335,17 +428,11 @@ async function runSearch() {
     await Engine.ensureCells([origin.lon, origin.lat], driveMin * DRIVE_KM_PER_MIN);
     if (seq !== searchSeq) return; // superseded by a newer search
 
-    // One forecast lookup for the origin (as the server did); null on any
-    // failure means "no forecast" and terrain-only scores.
-    const cloud = await Engine.getCloudCover(
-      origin.lat, origin.lon, dateStr, hhmmToMinutes(timeStr) / 60 | 0);
-    if (seq !== searchSeq) return;
-
     const minM = el("min-minutes").value;
     const maxM = el("max-minutes").value;
     const checked = [...document.querySelectorAll("#difficulty input:checked")]
       .map((c) => c.value);
-    const results = Engine.search({
+    const results = await Engine.search({
       lat: origin.lat,
       lon: origin.lon,
       driveMin,
@@ -354,8 +441,11 @@ async function runSearch() {
       maxMinutes: maxM ? Number(maxM) : null,
       difficulties: checked.length ? checked : null,
       limit: 20,
-      cloud,
+      useWeather: true,
+      rankBy: rankMode,
     });
+    if (seq !== searchSeq) return; // superseded by a newer search
+    lastResults = results;
     renderResults(results);
   } catch (err) {
     if (seq !== searchSeq) return;
@@ -364,6 +454,61 @@ async function runSearch() {
   } finally {
     if (seq === searchSeq) btn.disabled = false;
   }
+}
+
+/* headline metric for a result under the current rank mode: "forecast" shows
+ * sun.effective (terrain x cloud), "terrain" shows sun.terrain_frac. When a
+ * trail has no forecast, effective === terrain_frac already, so this never
+ * needs a special case. */
+function headlineFrac(r) {
+  return rankMode === "terrain" ? r.sun.terrain_frac : r.sun.effective;
+}
+
+function sortResults(results) {
+  const sorted = results.slice();
+  if (rankMode === "terrain") {
+    sorted.sort((a, b) => b.sun.terrain_frac - a.sun.terrain_frac);
+  } else {
+    sorted.sort((a, b) => b.sun.effective - a.sun.effective);
+  }
+  return sorted;
+}
+
+/* Lock the rank toggle to terrain (with an explanatory note) when NONE of
+ * the results has a forecast — e.g. date beyond the ~16-day horizon, or
+ * Open-Meteo unreachable. Never an error state. */
+function updateRankLock(results) {
+  rankLocked = results.length > 0 && results.every((r) => r.sun.no_forecast);
+  const toggle = el("rank-toggle");
+  const note = el("rank-lock-note");
+  if (toggle) toggle.classList.toggle("locked", rankLocked);
+  const forecastBtn = el("rank-forecast");
+  if (forecastBtn) forecastBtn.disabled = rankLocked;
+  if (rankLocked && rankMode !== "terrain") {
+    rankMode = "terrain";
+    syncRankToggleUI();
+  }
+  if (note) note.hidden = !rankLocked;
+}
+
+function syncRankToggleUI() {
+  const terrainBtn = el("rank-terrain");
+  const forecastBtn = el("rank-forecast");
+  if (!terrainBtn || !forecastBtn) return;
+  terrainBtn.classList.toggle("active", rankMode === "terrain");
+  forecastBtn.classList.toggle("active", rankMode === "forecast");
+  terrainBtn.setAttribute("aria-pressed", String(rankMode === "terrain"));
+  forecastBtn.setAttribute("aria-pressed", String(rankMode === "forecast"));
+}
+
+function setRankMode(mode) {
+  if (mode === rankMode) return;
+  rankMode = mode;
+  try {
+    localStorage.setItem(RANKMODE_STORE_KEY, rankMode);
+  } catch (err) { /* private mode etc. — rank mode just won't persist */ }
+  syncRankToggleUI();
+  if (lastResults.length) renderResults(lastResults);
 }
 
 function renderResults(results) {
@@ -375,13 +520,17 @@ function renderResults(results) {
   scrub.disabled = true;
   scrubInfo.textContent = "Select a trail to scrub its sunlight through the day";
 
+  updateRankLock(results);
+  syncRankToggleUI();
+
   if (!results.length) {
     showStatus("No trails found — try a longer drive time or fewer filters.");
     return;
   }
-  showStatus(`${results.length} trail${results.length > 1 ? "s" : ""} found, sunniest first.`);
+  const sorted = sortResults(results);
+  showStatus(`${sorted.length} trail${sorted.length > 1 ? "s" : ""} found, sunniest first.`);
 
-  for (const r of results) {
+  for (const r of sorted) {
     const card = buildCard(r);
     resultsBox.appendChild(card);
 
@@ -389,7 +538,7 @@ function renderResults(results) {
       radius: 7,
       color: "#fff",
       weight: 2,
-      fillColor: sunTint(r.sun.effective),
+      fillColor: sunTint(headlineFrac(r)),
       fillOpacity: 1,
     }).addTo(markersLayer);
     marker.bindTooltip(r.name || UNNAMED);
@@ -407,11 +556,36 @@ function sourceBadge(source) {
   return `<span class="badge ${cls}" title="${escapeHtml(full)}">${escapeHtml(label)}</span>`;
 }
 
+/* thin cloud strip above a card's sun timeline: one segment per timeline_cloud
+ * slot, grey-scale by cloud fraction (dark = cloudy). Absent/all-null ->
+ * caller omits the strip entirely (no forecast for this trail). */
+function cloudStripHtml(r) {
+  const tc = r.timeline_cloud;
+  if (!tc || !tc.length || tc.every((c) => c == null)) return "";
+  const slots = r.timeline.map((s, i) => {
+    const c = tc[i];
+    const label = c == null
+      ? `${s.t.slice(11, 16)} — ${Math.round(s.frac * 100)}% terrain sun · no forecast`
+      : `${s.t.slice(11, 16)} — ${Math.round(s.frac * 100)}% terrain sun · ${Math.round(c * 100)}% cloud`;
+    const bg = c == null ? "#e2e6eb" : cloudTint(c);
+    return `<i style="background:${bg}" title="${escapeHtml(label)}"></i>`;
+  }).join("");
+  return `<div class="cloud-strip">${slots}</div>`;
+}
+
+/* white (clear) -> mid-grey (overcast) tint for a cloud fraction in [0, 1] */
+function cloudTint(frac) {
+  const f = Math.max(0, Math.min(1, frac));
+  const v = Math.round(245 - 110 * f);
+  return `rgb(${v},${v},${v})`;
+}
+
 function buildCard(r) {
   const card = document.createElement("div");
   card.className = "card";
 
-  const sunPct = Math.round(r.sun.effective * 100);
+  const headline = headlineFrac(r);
+  const sunPct = Math.round(headline * 100);
   const meta = [];
   meta.push(sourceBadge(r.source));
   if (r.difficulty) {
@@ -430,11 +604,18 @@ function buildCard(r) {
   ).join("");
   const tlStart = r.timeline.length ? r.timeline[0].t.slice(11, 16) : "";
   const tlEnd = r.timeline.length ? r.timeline[r.timeline.length - 1].t.slice(11, 16) : "";
+  const cloudStrip = cloudStripHtml(r);
 
   const photo = r.photo_url
     ? `<img class="card-photo" src="${escapeHtml(r.photo_url)}" alt="" loading="lazy">`
     : "";
   if (photo) card.classList.add("has-photo");
+
+  const componentsLine = r.sun.no_forecast
+    ? `<small>sun · no forecast</small>`
+    : `<small title="sun score = terrain sun × (1 − 0.75 × cloud), duration-weighted over your hike window">` +
+      `☀ ${Math.round(r.sun.terrain_frac * 100)}% terrain · ` +
+      `☁ ${Math.round(r.sun.cloud_cover * 100)}% cloud</small>`;
 
   card.innerHTML = `
     ${photo}
@@ -443,10 +624,11 @@ function buildCard(r) {
         <h3>${escapeHtml(r.name || UNNAMED)}</h3>
         <div class="sunpct">
           <b>${sunPct}%</b>
-          <small>${r.sun.no_forecast ? "sun · no forecast" : "sun (incl. cloud)"}</small>
+          ${componentsLine}
         </div>
       </div>
       <div class="meta">${meta.join("")}</div>
+      ${cloudStrip}
       <div class="timeline">${slots}</div>
       <div class="tl-caption"><span>${tlStart}</span><span>sun along your hike</span><span>${tlEnd}</span></div>
     </div>
@@ -595,15 +777,51 @@ function drawTrail(detail, fitMap) {
 
   const sunny = pts.filter((p) => p.sun).length;
   const pct = Math.round((100 * sunny) / pts.length);
+  const cloudPct = cloudAtScrub();
+  const cloudPart = cloudPct == null ? "" : ` · ${cloudPct}% cloud`;
   scrubInfo.textContent =
-    `${detail.name || UNNAMED} — ${pct}% of the trail in sun at ${minutesToHHMM(+scrub.value)}`;
+    `${detail.name || UNNAMED} — ${pct}% of the trail in sun at ${minutesToHHMM(+scrub.value)}${cloudPart}`;
+}
+
+/* cloud fraction (0-100) at the scrubber's current time for the selected
+ * result's own timeline_cloud, or null if no forecast covers that slot. */
+function cloudAtScrub() {
+  if (!selected || !selected.timeline_cloud || !selected.timeline) return null;
+  const scrubMin = +scrub.value;
+  let best = null;
+  let bestDiff = Infinity;
+  for (let i = 0; i < selected.timeline.length; i++) {
+    const slotMin = hhmmToMinutes(selected.timeline[i].t.slice(11, 16));
+    const diff = Math.abs(slotMin - scrubMin);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = selected.timeline_cloud[i];
+    }
+  }
+  return best == null ? null : Math.round(best * 100);
 }
 
 scrub.addEventListener("input", () => {
   scrubLabel.textContent = minutesToHHMM(+scrub.value);
   clearTimeout(scrubTimer);
   scrubTimer = setTimeout(() => loadTrailDetail(false), 120);
+  scheduleShadowUpdate();
 });
+
+/* date change also drives the shadow overlay (bound to both the scrubber
+ * and the date input, per the plan) */
+dateInput.addEventListener("change", () => scheduleShadowUpdate());
+
+/* ---- rank toggle ---------------------------------------------------------- */
+
+const rankTerrainBtn = el("rank-terrain");
+const rankForecastBtn = el("rank-forecast");
+if (rankTerrainBtn && rankForecastBtn) {
+  rankTerrainBtn.addEventListener("click", () => setRankMode("terrain"));
+  rankForecastBtn.addEventListener("click", () => {
+    if (!rankLocked) setRankMode("forecast");
+  });
+}
 
 /* ---- boot ---------------------------------------------------------------- */
 
@@ -617,6 +835,9 @@ form.addEventListener("submit", (ev) => {
   // way), so viewers in other timezones still search the right NZ day.
   dateInput.value = Engine.nzDateStr();
   el("origin-label").textContent = `📍 Origin: ${origin.label}`;
+  syncRankToggleUI();
+  syncShadowToggleUI();
+  applyShadowEnabled();
 
   // Sanity numbers for manual verification (see engine.js self-test block):
   // sunPosition(-43.5321, 172.6362, nzEpoch("2026-07-02","10:00")) should

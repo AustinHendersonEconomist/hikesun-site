@@ -51,6 +51,12 @@
         <label class="diff"><input type="checkbox" value="hard"><span>hard</span></label>
         <label class="diff"><input type="checkbox" value="expert"><span>expert</span></label>
       </div>
+      <div class="diff-label">Rank by</div>
+      <div class="rank-toggle" id="rank-toggle" role="group" aria-label="Rank results by">
+        <button type="button" id="rank-forecast" class="rank-btn" aria-pressed="true">⛅ forecast</button>
+        <button type="button" id="rank-terrain" class="rank-btn" aria-pressed="false">☀ terrain</button>
+      </div>
+      <p id="rank-lock-note" class="rank-lock-note" hidden>Forecast unavailable for this date — ranking by terrain sun.</p>
       <button type="submit" id="search-btn">Search sunny hikes</button>
     </form>
 
@@ -66,6 +72,8 @@
       <input type="range" id="scrub" min="480" max="1020" step="15" value="600"
              disabled aria-label="Time of day scrubber">
       <span id="scrub-info">Select a trail to scrub its sunlight through the day</span>
+      <button type="button" id="shadow-toggle" title="Toggle terrain shadow overlay" aria-pressed="false">🌗 Shadows</button>
+      <span id="shadow-busy" class="shadow-busy" hidden>computing shadows…</span>
       <button type="button" id="origin-arm" title="Set origin by clicking the map">📍 Set origin</button>
     </div>
     <div id="photo-strip" class="photo-strip" hidden>
@@ -78,10 +86,15 @@
     <div class="legend">
       <span><i class="swatch sun-sw"></i> Sun</span>
       <span><i class="swatch shade-sw"></i> Shade</span>
+      <span><i class="swatch cloud-sw"></i> Cloud strip: grey-scale forecast, terrain sun below</span>
+      <span><i class="swatch shadow-sw"></i> Terrain shadow overlay</span>
     </div>
+    <div class="attribution">Terrain: AWS Open Data Terrain Tiles (Mapzen)</div>
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="sunmath.js"></script>
+  <script src="shadow-layer.js"></script>
   <script src="engine.js"></script>
   <script src="app.js"></script>
 </body>
