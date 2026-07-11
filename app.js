@@ -168,6 +168,17 @@ function setShadowsEnabled(on) {
 
 shadowToggleBtn.addEventListener("click", () => setShadowsEnabled(!shadowsEnabled));
 
+/* full-screen map: hide the sidebar so the map fills the viewport. Leaflet
+ * needs invalidateSize() once the container has resized. */
+const mapExpandBtn = el("map-expand");
+mapExpandBtn.addEventListener("click", () => {
+  const full = document.body.classList.toggle("map-full");
+  mapExpandBtn.textContent = full ? "✕" : "⛶";
+  mapExpandBtn.setAttribute("aria-pressed", String(full));
+  mapExpandBtn.title = full ? "Exit full-screen map" : "Toggle full-screen map";
+  setTimeout(() => map.invalidateSize(), 60);
+});
+
 /* current scrubber time as an NZ epoch (ms), for the shadow layer */
 function currentShadowEpochMs() {
   return SunMath.nzEpoch(dateInput.value, minutesToHHMM(+scrub.value));

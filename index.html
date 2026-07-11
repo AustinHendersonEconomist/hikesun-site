@@ -12,6 +12,7 @@
     <header>
       <h1>HikeSun <span class="sun">☀</span></h1>
       <p class="tagline">Find hikes that will be in the sun — terrain shadows, forest cover and forecast, together.</p>
+      <a class="how-link" href="how-it-works.html" target="_blank" rel="noopener">ⓘ How HikeSun works</a>
     </header>
 
     <form id="search-form" autocomplete="off">
@@ -90,6 +91,9 @@
       <span><i class="swatch shadow-sw"></i> Terrain shadow overlay</span>
     </div>
     <div class="attribution">Terrain: AWS Open Data Terrain Tiles (Mapzen)</div>
+    <button type="button" id="map-expand" class="map-expand"
+            title="Toggle full-screen map" aria-label="Toggle full-screen map"
+            aria-pressed="false">⛶</button>
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
