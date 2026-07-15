@@ -116,6 +116,25 @@ L.control.layers({ "Map": osm, "Satellite": esri }).addTo(map);
 const markersLayer = L.layerGroup().addTo(map);
 const trailLayer = L.layerGroup().addTo(map);
 
+/* map marker for a result: hikes stay a sun-tinted dot; places (beaches,
+ * parks, gardens, reserves) get a recognisable emoji badge, still tinted by
+ * how sunny they are, so you can spot a beach on the map at a glance. */
+function makeMarker(r) {
+  const kind = r.kind || "hike";
+  const tint = sunTint(headlineFrac(r));
+  if (kind === "hike") {
+    return L.circleMarker([r.start[1], r.start[0]], {
+      radius: 7, color: "#fff", weight: 2, fillColor: tint, fillOpacity: 1,
+    });
+  }
+  const icon = L.divIcon({
+    className: "place-marker",
+    html: `<span style="background:${tint}">${KIND_EMOJI[kind] || "📍"}</span>`,
+    iconSize: [26, 26], iconAnchor: [13, 13],
+  });
+  return L.marker([r.start[1], r.start[0]], { icon });
+}
+
 /* ---- terrain shadow overlay ----------------------------------------------
  * Dedicated shadowPane (zIndex 350, between basemap tiles 200 and trails
  * 400), pointer-events:none, opacity ~0.45 so trails stay visible above it.
@@ -718,13 +737,7 @@ function renderResults(results) {
     const card = buildCard(r);
     resultsBox.appendChild(card);
 
-    const marker = L.circleMarker([r.start[1], r.start[0]], {
-      radius: 7,
-      color: "#fff",
-      weight: 2,
-      fillColor: sunTint(headlineFrac(r)),
-      fillOpacity: 1,
-    }).addTo(markersLayer);
+    const marker = makeMarker(r).addTo(markersLayer);
     marker.bindTooltip(displayName(r));
     marker.on("click", () => {
       selectTrail(r, card);

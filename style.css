@@ -379,6 +379,14 @@ input:focus {
 .cloud-sw { background: linear-gradient(to right, #f5f5f5, #8b8b8b); }
 .shadow-sw { background: rgba(30, 41, 59, 0.55); }
 
+/* place markers: emoji badge tinted by sunniness (beaches/parks/reserves) */
+.place-marker span {
+  display: flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 2px solid #fff; box-shadow: 0 1px 5px rgba(15, 23, 42, 0.45);
+  font-size: 14px; line-height: 1;
+}
+
 /* live-satellite frame-time caption, above the attribution line and left of
  * the full-screen button; hoverable (title explains the "live" semantics) */
 .cloud-caption {
