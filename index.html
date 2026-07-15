@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HikeSun ☀ — sunny hikes in New Zealand</title>
+  <title>Sunward ☀ — sunny hikes in New Zealand</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <aside id="sidebar">
     <header>
-      <h1>HikeSun <span class="sun">☀</span></h1>
+      <h1>Sunward <span class="sun">☀</span></h1>
       <p class="tagline">Find hikes that will be in the sun — terrain shadows, forest cover and forecast, together.</p>
-      <a class="how-link" href="how-it-works.html" target="_blank" rel="noopener">ⓘ How HikeSun works</a>
+      <a class="how-link" href="how-it-works.html" target="_blank" rel="noopener">ⓘ How Sunward works</a>
     </header>
 
     <form id="search-form" autocomplete="off">
@@ -52,6 +52,13 @@
         <label class="diff"><input type="checkbox" value="hard"><span>hard</span></label>
         <label class="diff"><input type="checkbox" value="expert"><span>expert</span></label>
       </div>
+      <div class="diff-label">Show</div>
+      <div class="diff-boxes" id="kinds">
+        <label class="diff"><input type="checkbox" value="hike" checked><span>🥾 Hikes</span></label>
+        <label class="diff"><input type="checkbox" value="beach" checked><span>🏖 Beaches</span></label>
+        <label class="diff"><input type="checkbox" value="park,garden" checked><span>🌳 Parks &amp; gardens</span></label>
+        <label class="diff"><input type="checkbox" value="reserve" checked><span>🦜 Reserves</span></label>
+      </div>
       <div class="diff-label">Rank by</div>
       <div class="rank-toggle" id="rank-toggle" role="group" aria-label="Rank results by">
         <button type="button" id="rank-forecast" class="rank-btn" aria-pressed="true">⛅ forecast</button>
@@ -75,6 +82,9 @@
       <span id="scrub-info">Drag the slider to move the sun; click a trail to see its sunlight</span>
       <button type="button" id="shadow-toggle" title="Toggle terrain shadow overlay" aria-pressed="false">🌗 Shadows</button>
       <span id="shadow-busy" class="shadow-busy" hidden>computing shadows…</span>
+      <button type="button" id="cloud-toggle"
+              title="Live satellite cloud overlay (infrared: bright/white = cloud tops). Shows the sky RIGHT NOW — unlike the shadows, it does not follow the time slider."
+              aria-pressed="false">☁ Live clouds</button>
       <button type="button" id="origin-arm" title="Set origin by clicking the map">📍 Set origin</button>
     </div>
     <div id="photo-strip" class="photo-strip" hidden>
@@ -90,7 +100,9 @@
       <span><i class="swatch cloud-sw"></i> Cloud strip: grey-scale forecast, terrain sun below</span>
       <span><i class="swatch shadow-sw"></i> Terrain shadow overlay</span>
     </div>
-    <div class="attribution">Terrain: AWS Open Data Terrain Tiles (Mapzen)</div>
+    <div id="cloud-caption" class="cloud-caption" hidden
+         title="Live satellite infrared image (bright = cloud) — the sky right now; it does not follow the time slider"></div>
+    <div class="attribution">Terrain: AWS Open Data Terrain Tiles (Mapzen) · Clouds: NASA GIBS / Himawari</div>
     <button type="button" id="map-expand" class="map-expand"
             title="Toggle full-screen map" aria-label="Toggle full-screen map"
             aria-pressed="false">⛶</button>

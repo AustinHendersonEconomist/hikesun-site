@@ -1,4 +1,4 @@
-/* HikeSun client-side scoring engine — a faithful port of hikesun/sun.py and
+/* Sunward client-side scoring engine — a faithful port of hikesun/sun.py and
  * hikesun/score.py so the app can run 100% statically (GitHub Pages).
  *
  * Data comes from tools/export_static.py, sharded into 1-degree cells so the
@@ -117,7 +117,7 @@ const Engine = (() => {
     ]);
     if (metaResp.status === 404 || binResp.status === 404) {
       // deployed index lists a cell whose files are gone: treat as empty
-      console.warn(`HikeSun: cell ${id} files missing (404), treating as empty`);
+      console.warn(`Sunward: cell ${id} files missing (404), treating as empty`);
       data.loadedCells++;
       return;
     }
@@ -160,6 +160,15 @@ const Engine = (() => {
   }
 
   /* ---- scoring (port of hikesun/score.py) -------------------------------- */
+
+  /* Place kind of a trail: 'place:' categories (beaches, gardens, parks,
+   * reserves ingested with source='place') expose their kind after the
+   * prefix; everything else is a plain hike. Mirrors the Python mapping. */
+  function trailKind(trail) {
+    const cat = trail.category;
+    return (typeof cat === "string" && cat.startsWith("place:"))
+      ? cat.slice(6) : "hike";
+  }
 
   /* True iff global trail point pointIndexGlobal is in sun for a sun at
    * (elevDeg, azDeg): the sun is up AND clears the precomputed terrain
@@ -314,17 +323,22 @@ const Engine = (() => {
    * Returns a Promise resolving to up to limit result dicts (async because
    * of the batched forecast fetch). */
   async function search({ lat, lon, driveMin = 30, startMs, minMinutes = null,
-                          maxMinutes = null, difficulties = null, limit = 20,
-                          useWeather = true, rankBy = "forecast" }) {
+                          maxMinutes = null, difficulties = null, kinds = null,
+                          limit = 20, useWeather = true, rankBy = "forecast" }) {
     if (rankBy !== "forecast" && rankBy !== "terrain") {
       throw new Error(`search: rankBy must be "forecast" or "terrain", got ${rankBy}`);
     }
     const d = requireData();
     const radiusKm = driveMin * DRIVE_KM_PER_MIN;
+    // opts.kinds: array/Set of 'hike'|'beach'|'garden'|'park'|'reserve';
+    // null/undefined = no constraint (all kinds). An empty set matches nothing.
+    const kindSet = kinds == null
+      ? null : (kinds instanceof Set ? kinds : new Set(kinds));
 
     const candidates = [];
     for (const trail of d.trails) {
       if (!trail.start) continue;
+      if (kindSet != null && !kindSet.has(trailKind(trail))) continue;
       const distKm = haversineKm(lon, lat, trail.start[0], trail.start[1]);
       if (distKm > radiusKm) continue;
       const est = trail.est_minutes;
@@ -381,6 +395,7 @@ const Engine = (() => {
         name: trail.name,
         source: trail.source,
         category: trail.category,
+        kind: trailKind(trail),
         difficulty: trail.difficulty,
         length_m: trail.length_m,
         est_minutes: est,
@@ -442,6 +457,7 @@ const Engine = (() => {
       name: trail.name,
       source: trail.source,
       category: trail.category,
+      kind: trailKind(trail),
       difficulty: trail.difficulty,
       status: trail.status,
       length_m: trail.length_m,

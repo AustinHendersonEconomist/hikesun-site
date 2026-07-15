@@ -134,12 +134,12 @@
         try {
           worker = new Worker(this.options.workerUrl);
         } catch (err) {
-          console.error("HikeSun: failed to start shadow worker", err);
+          console.error("Sunward: failed to start shadow worker", err);
           break;
         }
         worker.onmessage = (ev) => this._onWorkerMessage(ev);
         worker.onerror = (ev) => {
-          console.error("HikeSun: shadow worker error", ev.message || ev);
+          console.error("Sunward: shadow worker error", ev.message || ev);
         };
         this._workers.push(worker);
       }
@@ -282,7 +282,7 @@
       const msg = ev.data;
       const job = this._pendingJobs.get(msg.id);
       if (msg.phase === "error") {
-        console.error("HikeSun: shadow worker job failed:", msg.message);
+        console.error("Sunward: shadow worker job failed:", msg.message);
         if (job) {
           this._pendingJobs.delete(msg.id);
           this._setBusy(false);

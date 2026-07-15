@@ -1,4 +1,4 @@
-/* HikeSun static web UI: search form -> Engine.search cards; clicking a card
+/* Sunward static web UI: search form -> Engine.search cards; clicking a card
  * draws the trail as per-point sun/shade segments from Engine.trailDetail,
  * and the time scrubber recomputes the detail to recolour the trail live.
  * All scoring runs client-side (engine.js); only the map tiles, regional
@@ -12,7 +12,6 @@ const SUN_COLOR = "#FDB515";
 const SHADE_COLOR = "#64748B";
 const SUN_RGB = [253, 181, 21];
 const SHADE_RGB = [203, 213, 225]; // light grey for 0%-sun timeline slots
-const UNNAMED = "Unnamed track";
 const DRIVE_KM_PER_MIN = 0.85; // crow-flies km per minute of driving
 const SCRUB_HINT = "Drag the slider to move the sun; click a trail to see its sunlight";
 
@@ -31,6 +30,16 @@ const SOURCE_LABELS = {
   osm: ["OSM", "OpenStreetMap"],
   hnk: ["HNK", "Herenga ā Nuku Outdoor Access Commission"],
 };
+
+/* place kinds (beaches/gardens/parks/reserves): chip emoji, and the unnamed
+ * fallback — "Unnamed track" for hikes, "Unnamed beach" etc. for places */
+const KIND_EMOJI = { beach: "🏖", garden: "🌳", park: "🌳", reserve: "🦜" };
+
+function displayName(r) {
+  if (r.name) return r.name;
+  const kind = r.kind || "hike";
+  return kind === "hike" ? "Unnamed track" : `Unnamed ${kind}`;
+}
 
 /* fetch with a hard timeout so a dead third-party service can't hang the UI */
 function fetchTimeout(url, ms = 8000) {
@@ -167,6 +176,152 @@ function setShadowsEnabled(on) {
 }
 
 shadowToggleBtn.addEventListener("click", () => setShadowsEnabled(!shadowsEnabled));
+
+/* ---- live satellite cloud overlay (NASA GIBS / Himawari Band 13 IR) ------
+ * LIVE ONLY: shows the most recent published frame (typically 20-30 min old)
+ * and deliberately does NOT follow the time scrubber — the terrain shadows
+ * do, but the satellite cannot show the future. Infrared greyscale:
+ * bright/white = cloud tops. Frames are published every 10 minutes with some
+ * latency, so we probe one known tile and step back until a frame exists. */
+const CLOUDS_STORE_KEY = "hikesun-clouds"; // legacy key prefix kept on purpose
+const GIBS_URL_PREFIX = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/" +
+  "Himawari_AHI_Band13_Clean_Infrared/default/";
+const GIBS_URL_SUFFIX = "/GoogleMapsCompatible_Level6/{z}/{y}/{x}.png";
+const CLOUD_FRAME_LAG_MIN = 20;         // first candidate: now minus this
+const CLOUD_PROBE_TRIES = 6;            // then step back 10 min at a time
+const CLOUD_REFRESH_MS = 10 * 60 * 1000;
+
+// cloudPane: above the shadow overlay (350), below the trail lines (400)
+map.createPane("cloudPane");
+map.getPane("cloudPane").style.zIndex = 360;
+map.getPane("cloudPane").style.pointerEvents = "none";
+
+const cloudToggleBtn = el("cloud-toggle");
+const cloudCaption = el("cloud-caption");
+
+let cloudsEnabled = false;
+let cloudLayer = null;
+let cloudRefreshTimer = null;
+let cloudSeq = 0; // guards overlapping enable/refresh probe chains
+
+function loadCloudsEnabled() {
+  try {
+    const v = localStorage.getItem(CLOUDS_STORE_KEY);
+    if (v === "on" || v === "off") return v === "on";
+  } catch (err) { /* corrupt/unavailable storage — fall back to default */ }
+  return false; // default OFF
+}
+
+function storeCloudsEnabled(on) {
+  try {
+    localStorage.setItem(CLOUDS_STORE_KEY, on ? "on" : "off");
+  } catch (err) { /* private mode etc. — preference just won't persist */ }
+}
+
+function gibsUrl(frameIso) {
+  return GIBS_URL_PREFIX + frameIso + GIBS_URL_SUFFIX;
+}
+
+/* UTC ISO "YYYY-MM-DDTHH:MM:00Z" for (now − lag − stepBack·10 min), floored
+ * to a 10-minute boundary (GIBS publishes Himawari frames every 10 min). */
+function cloudFrameIso(stepBack) {
+  const tenMinMs = 10 * 60000;
+  const t = Math.floor((Date.now() - CLOUD_FRAME_LAG_MIN * 60000
+    - stepBack * tenMinMs) / tenMinMs) * tenMinMs;
+  return new Date(t).toISOString().slice(0, 17) + "00Z";
+}
+
+/* probe a single tile that covers NZ at z=6 (row y=40, col x=62 — note GIBS
+ * WMTS puts the row before the column) to see if the frame is published */
+async function probeCloudFrame(frameIso) {
+  const url = gibsUrl(frameIso)
+    .replace("{z}", "6").replace("{y}", "40").replace("{x}", "62");
+  try {
+    const resp = await fetchTimeout(url);
+    return resp.ok;
+  } catch (err) {
+    return false;
+  }
+}
+
+/* newest available frame time, or null if none of the candidates exists */
+async function findCloudFrame() {
+  for (let step = 0; step < CLOUD_PROBE_TRIES; step++) {
+    const iso = cloudFrameIso(step);
+    if (await probeCloudFrame(iso)) return iso;
+  }
+  return null;
+}
+
+function syncCloudToggleUI() {
+  cloudToggleBtn.classList.toggle("on", cloudsEnabled);
+  cloudToggleBtn.setAttribute("aria-pressed", String(cloudsEnabled));
+}
+
+/* create-or-retarget the tile layer for a frame and update the caption
+ * (frame time shown as NZ local wall clock) */
+function applyCloudFrame(frameIso) {
+  const url = gibsUrl(frameIso);
+  if (!cloudLayer) {
+    cloudLayer = L.tileLayer(url, {
+      tms: false,
+      maxNativeZoom: 6,
+      maxZoom: 15,
+      opacity: 0.55,
+      pane: "cloudPane",
+    });
+  } else if (cloudLayer._url !== url) {
+    cloudLayer.setUrl(url);
+  }
+  if (!map.hasLayer(cloudLayer)) cloudLayer.addTo(map);
+  cloudCaption.textContent =
+    `clouds: live satellite ${SunMath.isoNZ(Date.parse(frameIso)).slice(11, 16)}`;
+  cloudCaption.hidden = false;
+}
+
+function disableClouds({ persist = true } = {}) {
+  cloudSeq++; // cancels any in-flight probe chain
+  cloudsEnabled = false;
+  if (persist) storeCloudsEnabled(false);
+  clearInterval(cloudRefreshTimer);
+  cloudRefreshTimer = null;
+  if (cloudLayer && map.hasLayer(cloudLayer)) map.removeLayer(cloudLayer);
+  cloudCaption.hidden = true;
+  syncCloudToggleUI();
+}
+
+async function enableClouds({ persist = true } = {}) {
+  const seq = ++cloudSeq;
+  cloudsEnabled = true;
+  if (persist) storeCloudsEnabled(true);
+  syncCloudToggleUI();
+  const frame = await findCloudFrame();
+  if (seq !== cloudSeq) return; // toggled off (or re-toggled) meanwhile
+  if (frame == null) {
+    showToast("live cloud imagery unavailable right now");
+    disableClouds(); // leaves the toggle off
+    return;
+  }
+  applyCloudFrame(frame);
+  clearInterval(cloudRefreshTimer);
+  cloudRefreshTimer = setInterval(refreshCloudFrame, CLOUD_REFRESH_MS);
+}
+
+/* every 10 min while enabled: look for a newer frame and retarget the layer;
+ * if GIBS is briefly unreachable just keep showing the last good frame */
+async function refreshCloudFrame() {
+  const seq = cloudSeq;
+  const frame = await findCloudFrame();
+  if (seq !== cloudSeq || !cloudsEnabled || frame == null) return;
+  applyCloudFrame(frame);
+}
+
+cloudToggleBtn.addEventListener("click", () => {
+  if (cloudsEnabled) disableClouds();
+  else enableClouds();
+});
+
+if (loadCloudsEnabled()) enableClouds({ persist: false });
 
 /* full-screen map: hide the sidebar so the map fills the viewport. Leaflet
  * needs invalidateSize() once the container has resized. */
@@ -423,6 +578,16 @@ el("locate-btn").addEventListener("click", () => {
 
 /* ---- search ------------------------------------------------------------- */
 
+/* checked "Show" kinds as a flat array (one chip may carry several comma-
+ * separated kinds, e.g. "park,garden"), or null when every chip is checked —
+ * all-on means no kind constraint. All-off yields [] (matches nothing). */
+function selectedKinds() {
+  const boxes = [...document.querySelectorAll("#kinds input")];
+  const checked = boxes.filter((b) => b.checked);
+  if (!boxes.length || checked.length === boxes.length) return null;
+  return checked.flatMap((b) => b.value.split(","));
+}
+
 async function runSearch() {
   if (!engineReady) return; // index not loaded (message already shown)
   const btn = el("search-btn");
@@ -452,6 +617,7 @@ async function runSearch() {
       minMinutes: minM ? Number(minM) : null,
       maxMinutes: maxM ? Number(maxM) : null,
       difficulties: checked.length ? checked : null,
+      kinds: selectedKinds(),
       limit: 20,
       useWeather: true,
       rankBy: rankMode,
@@ -559,7 +725,7 @@ function renderResults(results) {
       fillColor: sunTint(headlineFrac(r)),
       fillOpacity: 1,
     }).addTo(markersLayer);
-    marker.bindTooltip(r.name || UNNAMED);
+    marker.bindTooltip(displayName(r));
     marker.on("click", () => {
       selectTrail(r, card);
       card.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -606,6 +772,11 @@ function buildCard(r) {
   const sunPct = Math.round(headline * 100);
   const meta = [];
   meta.push(sourceBadge(r.source));
+  const kind = r.kind || "hike";
+  if (kind !== "hike") {
+    meta.push(`<span class="chip kind" title="Place type">` +
+      `${KIND_EMOJI[kind] || "📍"} ${escapeHtml(kind)}</span>`);
+  }
   if (r.difficulty) {
     meta.push(`<span class="chip ${escapeHtml(r.difficulty)}">${escapeHtml(r.difficulty)}</span>`);
   }
@@ -639,7 +810,7 @@ function buildCard(r) {
     ${photo}
     <div class="card-main">
       <div class="card-top">
-        <h3>${escapeHtml(r.name || UNNAMED)}</h3>
+        <h3>${escapeHtml(displayName(r))}</h3>
         <div class="sunpct">
           <b>${sunPct}%</b>
           ${componentsLine}
@@ -715,7 +886,7 @@ async function loadPhotoStrip(r) {
 
   const items = [];
   if (r.photo_url) {
-    items.push({ thumb: r.photo_url, href: r.url || null, title: r.name || UNNAMED });
+    items.push({ thumb: r.photo_url, href: r.url || null, title: displayName(r) });
   }
   const commons = await fetchCommonsPhotos(r.start[1], r.start[0]);
   if (seq !== photoSeq) return; // a newer selection superseded this load
@@ -795,7 +966,7 @@ function drawTrail(detail, fitMap) {
   const cloudPct = cloudAtScrub();
   const cloudPart = cloudPct == null ? "" : ` · ${cloudPct}% cloud`;
   scrubInfo.textContent =
-    `${detail.name || UNNAMED} — ${pct}% of the trail in sun at ${minutesToHHMM(+scrub.value)}${cloudPart}`;
+    `${displayName(detail)} — ${pct}% of the trail in sun at ${minutesToHHMM(+scrub.value)}${cloudPart}`;
 }
 
 /* cloud fraction (0-100) at the scrubber's current time for the selected
@@ -866,7 +1037,7 @@ form.addEventListener("submit", (ev) => {
   // give elevation ~14.7362, azimuth ~36.1774.
   const probe = Engine.sunPosition(-43.5321, 172.6362,
     Engine.nzEpoch("2026-07-02", "10:00"));
-  console.log("HikeSun static: sun @ Chch 2026-07-02 10:00 NZ =",
+  console.log("Sunward static: sun @ Chch 2026-07-02 10:00 NZ =",
     probe.elevation.toFixed(4), "deg elev,", probe.azimuth.toFixed(4),
     "deg az (expect ~14.7362 / ~36.1774)");
 
@@ -875,7 +1046,7 @@ form.addEventListener("submit", (ev) => {
   try {
     await Engine.loadIndex(".");
     engineReady = true;
-    console.log("HikeSun static: trail index loaded");
+    console.log("Sunward static: trail index loaded");
   } catch (err) {
     showStatus(`Could not load trail data: ${err.message}`, true);
     return;
