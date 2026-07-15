@@ -328,34 +328,11 @@ const Engine = (() => {
     if (rankBy !== "forecast" && rankBy !== "terrain") {
       throw new Error(`search: rankBy must be "forecast" or "terrain", got ${rankBy}`);
     }
-    const d = requireData();
-    const radiusKm = driveMin * DRIVE_KM_PER_MIN;
-    // opts.kinds: array/Set of 'hike'|'beach'|'garden'|'park'|'reserve';
-    // null/undefined = no constraint (all kinds). An empty set matches nothing.
-    const kindSet = kinds == null
-      ? null : (kinds instanceof Set ? kinds : new Set(kinds));
-
-    const candidates = [];
-    for (const trail of d.trails) {
-      if (!trail.start) continue;
-      if (kindSet != null && !kindSet.has(trailKind(trail))) continue;
-      const distKm = haversineKm(lon, lat, trail.start[0], trail.start[1]);
-      if (distKm > radiusKm) continue;
-      const est = trail.est_minutes;
-      if (minMinutes != null && (est == null || est < minMinutes)) continue;
-      if (maxMinutes != null && (est == null || est > maxMinutes)) continue;
-      if (difficulties != null && !difficulties.includes(trail.difficulty)) continue;
-      const terrainScore = scoreTrail(trail, startMs, null);
-      candidates.push({ trail, distKm, terrainScore });
-    }
-
-    // Pass 1 result: keep only the top `limit` by terrain, so the (single)
-    // batched forecast call covers exactly the trails we will return. Ties
-    // break by ascending id so membership at the truncation boundary is
-    // deterministic and identical to hikesun/score.py.
-    candidates.sort((a, b) =>
-      (b.terrainScore.terrain_frac - a.terrainScore.terrain_frac)
-      || (a.trail.id - b.trail.id));
+    // every in-range, filter-passing trail, terrain-scored + sorted; then
+    // keep only the top `limit` so the (single) batched forecast call covers
+    // exactly the trails we return.
+    const candidates = gatherCandidates({ lat, lon, driveMin, startMs,
+      minMinutes, maxMinutes, difficulties, kinds });
     const kept = candidates.slice(0, limit);
 
     const cloudDate = nzDateStr(startMs);
@@ -428,6 +405,67 @@ const Engine = (() => {
         (b.sun.effective - a.sun.effective) || (a.id - b.id));
     }
     return results;
+  }
+
+  /* Every in-range, filter-passing trail, terrain-scored and sorted by
+   * terrain sun (ties by ascending id). Shared by search() and
+   * candidatesInRange(). opts.kinds: array/Set of kinds, or null = all. */
+  function gatherCandidates({ lat, lon, driveMin = 30, startMs,
+                              minMinutes = null, maxMinutes = null,
+                              difficulties = null, kinds = null }) {
+    const d = requireData();
+    const radiusKm = driveMin * DRIVE_KM_PER_MIN;
+    const kindSet = kinds == null
+      ? null : (kinds instanceof Set ? kinds : new Set(kinds));
+    const candidates = [];
+    for (const trail of d.trails) {
+      if (!trail.start) continue;
+      if (kindSet != null && !kindSet.has(trailKind(trail))) continue;
+      const distKm = haversineKm(lon, lat, trail.start[0], trail.start[1]);
+      if (distKm > radiusKm) continue;
+      const est = trail.est_minutes;
+      if (minMinutes != null && (est == null || est < minMinutes)) continue;
+      if (maxMinutes != null && (est == null || est > maxMinutes)) continue;
+      if (difficulties != null && !difficulties.includes(trail.difficulty)) continue;
+      const terrainScore = scoreTrail(trail, startMs, null);
+      candidates.push({ trail, distKm, terrainScore });
+    }
+    candidates.sort((a, b) =>
+      (b.terrainScore.terrain_frac - a.terrainScore.terrain_frac)
+      || (a.trail.id - b.trail.id));
+    return candidates;
+  }
+
+  /* Every in-range option — no weather, no limit — terrain-scored, for the
+   * "show all on map" view. Lightweight result objects tinted by terrain sun
+   * (sun.effective mirrors terrain_frac so the same card/marker code works).
+   * Synchronous: no forecast fetch. */
+  function candidatesInRange(opts) {
+    return gatherCandidates(opts).map(({ trail, distKm, terrainScore }) => ({
+      id: trail.id,
+      name: trail.name,
+      source: trail.source,
+      category: trail.category,
+      kind: trailKind(trail),
+      difficulty: trail.difficulty,
+      length_m: trail.length_m,
+      est_minutes: trail.est_minutes,
+      canopy_frac: trail.canopy_frac,
+      canopy_type: trail.canopy_type,
+      region: trail.region,
+      url: trail.url,
+      photo_url: trail.photo_url,
+      drive_km: distKm,
+      drive_min_est: distKm / DRIVE_KM_PER_MIN,
+      start: trail.start,
+      sun: {
+        terrain_frac: terrainScore.terrain_frac,
+        effective: terrainScore.terrain_frac,
+        cloud_cover: null, cloud_source: null, no_forecast: true,
+      },
+      timeline: terrainScore.timeline,
+      timeline_cloud: terrainScore.timeline_cloud,
+    }));
   }
 
   /* Full detail for one trail: metadata, geometry, per-point sun state at
@@ -616,8 +654,8 @@ const Engine = (() => {
 
   return {
     sunPosition, nzEpoch, isoNZ, nzDateStr, loadIndex, ensureCells, inSun,
-    scoreTrail, search, trailDetail, getCloudCover, getCloudSeries,
-    getCloudSeriesBatch,
+    scoreTrail, search, candidatesInRange, trailDetail, getCloudCover,
+    getCloudSeries, getCloudSeriesBatch,
   };
 })();
 

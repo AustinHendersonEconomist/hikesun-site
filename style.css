@@ -576,9 +576,10 @@ input[type="text"] {
   font-weight: 600;
 }
 
-/* "🌗 Shadows" and "☁ Live clouds" toggles, same chip style as #origin-arm */
+/* "🌗 Shadows" / "☁ Live clouds" / "🗺 Show all" toggles, chip style as #origin-arm */
 #shadow-toggle,
-#cloud-toggle {
+#cloud-toggle,
+#showall-toggle {
   flex-shrink: 0;
   padding: 6px 10px;
   border: 1px solid #d7dde5;
@@ -593,10 +594,12 @@ input[type="text"] {
 }
 
 #shadow-toggle:hover,
-#cloud-toggle:hover { border-color: #fdb515; }
+#cloud-toggle:hover,
+#showall-toggle:hover { border-color: #fdb515; }
 
 #shadow-toggle.on,
-#cloud-toggle.on {
+#cloud-toggle.on,
+#showall-toggle.on {
   background: #fdb515;
   border-color: #fdb515;
   color: #462e00;

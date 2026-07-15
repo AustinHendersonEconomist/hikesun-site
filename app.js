@@ -65,6 +65,15 @@ let scrubTimer = null;
 let engineReady = false;  // Engine.loadIndex succeeded
 let lastResults = [];     // most recent search results, re-sorted client-side
                            // by the rank toggle (no refetch)
+let lastSearchOpts = null; // opts of the last search, for "show all on map"
+let lastCardById = new Map(); // result id -> its card element (current render)
+const SHOWALL_STORE_KEY = "hikesun-showall";
+const SHOWALL_CAP = 500;   // don't paint more than this many markers at once
+function loadShowAll() {
+  try { return localStorage.getItem(SHOWALL_STORE_KEY) === "on"; }
+  catch (err) { return false; }
+}
+let showAllOnMap = loadShowAll();
 
 /* ---- rank mode (terrain vs forecast) ------------------------------------- */
 
@@ -195,6 +204,24 @@ function setShadowsEnabled(on) {
 }
 
 shadowToggleBtn.addEventListener("click", () => setShadowsEnabled(!shadowsEnabled));
+
+/* "Show all on map": mark every in-range option, not just the ranked top list
+ * — for surveying a new area. Only repaints markers; no re-search needed. */
+const showAllBtn = el("showall-toggle");
+function syncShowAllUI() {
+  showAllBtn.classList.toggle("on", showAllOnMap);
+  showAllBtn.setAttribute("aria-pressed", String(showAllOnMap));
+}
+function setShowAll(on) {
+  showAllOnMap = on;
+  try { localStorage.setItem(SHOWALL_STORE_KEY, on ? "on" : "off"); }
+  catch (err) { /* private mode — preference just won't persist */ }
+  syncShowAllUI();
+  if (lastResults.length) renderMarkers();
+  else if (!on) clearStatus();
+}
+showAllBtn.addEventListener("click", () => setShowAll(!showAllOnMap));
+syncShowAllUI();
 
 /* ---- live satellite cloud overlay (NASA GIBS / Himawari Band 13 IR) ------
  * LIVE ONLY: shows the most recent published frame (typically 20-30 min old)
@@ -628,18 +655,16 @@ async function runSearch() {
     const maxM = el("max-minutes").value;
     const checked = [...document.querySelectorAll("#difficulty input:checked")]
       .map((c) => c.value);
-    const results = await Engine.search({
-      lat: origin.lat,
-      lon: origin.lon,
-      driveMin,
-      startMs,
+    // shared by the ranked search and the "show all on map" candidate sweep
+    lastSearchOpts = {
+      lat: origin.lat, lon: origin.lon, driveMin, startMs,
       minMinutes: minM ? Number(minM) : null,
       maxMinutes: maxM ? Number(maxM) : null,
       difficulties: checked.length ? checked : null,
       kinds: selectedKinds(),
-      limit: 20,
-      useWeather: true,
-      rankBy: rankMode,
+    };
+    const results = await Engine.search({
+      ...lastSearchOpts, limit: 20, useWeather: true, rankBy: rankMode,
     });
     if (seq !== searchSeq) return; // superseded by a newer search
     lastResults = results;
@@ -727,22 +752,50 @@ function renderResults(results) {
   syncRankToggleUI();
 
   if (!results.length) {
+    markersLayer.clearLayers();
+    lastCardById = new Map();
     showStatus("No trails found — try a longer drive time or fewer filters.");
     return;
   }
   const sorted = sortResults(results);
   showStatus(`${sorted.length} trail${sorted.length > 1 ? "s" : ""} found, sunniest first.`);
 
+  lastCardById = new Map();
   for (const r of sorted) {
     const card = buildCard(r);
     resultsBox.appendChild(card);
+    lastCardById.set(r.id, card);
+  }
+  renderMarkers();
+}
 
+/* Paint map markers. Default: just the ranked result cards. With "show all
+ * on map" on, every in-range option is marked (terrain-scored, no weather) so
+ * you can survey a whole city's walks/beaches at a glance — clicking any
+ * marker selects it, and the top-list ones also highlight their card. */
+function renderMarkers() {
+  markersLayer.clearLayers();
+  const rich = new Map(lastResults.map((r) => [r.id, r]));
+  let list = lastResults;
+  let truncated = false;
+  if (showAllOnMap && lastSearchOpts) {
+    list = Engine.candidatesInRange(lastSearchOpts);
+    if (list.length > SHOWALL_CAP) { list = list.slice(0, SHOWALL_CAP); truncated = true; }
+  }
+  for (const r of list) {
     const marker = makeMarker(r).addTo(markersLayer);
     marker.bindTooltip(displayName(r));
     marker.on("click", () => {
-      selectTrail(r, card);
-      card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      const card = lastCardById.get(r.id) || null;
+      selectTrail(rich.get(r.id) || r, card);
+      if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
+  }
+  if (showAllOnMap && lastSearchOpts) {
+    showStatus(`${lastResults.length} sunniest listed · ${list.length}`
+      + `${truncated ? "+" : ""} shown on the map — click any marker.`);
+  } else {
+    showStatus(`${lastResults.length} trail${lastResults.length > 1 ? "s" : ""} found, sunniest first.`);
   }
 }
 
@@ -935,7 +988,7 @@ async function loadPhotoStrip(r) {
 function selectTrail(result, card) {
   selected = result;
   for (const c of resultsBox.querySelectorAll(".card")) c.classList.remove("selected");
-  card.classList.add("selected");
+  if (card) card.classList.add("selected");   // "show all" markers have no card
 
   // keep the scrubber wherever the user left it (they may have been
   // exploring shadows at another time); show this trail's sun for that time
